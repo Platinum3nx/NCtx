@@ -49,11 +49,20 @@ npm run build
 
 ## Install As A Claude Code Plugin
 
-After the package is published:
+For most users:
 
 ```bash
-claude plugin marketplace add ./path/to/marketplace
+claude plugin marketplace add Platinum3nx/NCtx
 claude plugin install nctx@nctx-marketplace
+```
+
+This installs the plugin from the public marketplace manifest in this GitHub repo. The plugin itself is distributed through npm as `@platinum3nx/nctx`.
+
+For direct CLI use:
+
+```bash
+npm install -g @platinum3nx/nctx
+nctx init
 ```
 
 For local plugin development from this checkout:
