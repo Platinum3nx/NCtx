@@ -78,6 +78,17 @@ describe("Worker install isolation helpers", () => {
     );
   });
 
+  it("only forwards whitelisted text search query parameters", () => {
+    const upstream = buildTextSearchUrl(
+      "https://worker.example/contexts/search?q=webhooks&tags=install:evil&limit=10&offset=5&include_highlights=TRUE&workspace_id=secret&api_key=leak",
+      "install:server"
+    );
+
+    expect(upstream.toString()).toBe(
+      "https://apigcp.trynia.ai/v2/contexts/search?q=webhooks&limit=10&offset=5&include_highlights=true&tags=install%3Aserver"
+    );
+  });
+
   it("over-fetches semantic search while preserving caller query options", () => {
     const search = buildSemanticSearchRequest(
       "https://worker.example/contexts/semantic-search?q=stripe&limit=8&include_highlights=false"
@@ -180,20 +191,13 @@ describe("Worker install isolation helpers", () => {
       return Response.json({ id: "ctx_saved", ...forwardedBody });
     });
 
-    const initResponse = await worker.fetch(
-      new Request("https://worker.example/installs", {
-        method: "POST",
-        headers: { "x-nctx-package-secret": "package-secret" }
-      }),
-      env
-    );
-    const initBody = (await initResponse.json()) as { install_token: string };
+    const installToken = await registerInstall(worker, env);
 
     const saveResponse = await worker.fetch(
       new Request("https://worker.example/contexts", {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${initBody.install_token}`,
+          Authorization: `Bearer ${installToken}`,
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
@@ -213,9 +217,97 @@ describe("Worker install isolation helpers", () => {
     expect(forwardedBody.metadata.install_id).not.toBe("attacker");
     expect(forwardedBody.tags).toEqual(["project:alpha", "topic", `install:${forwardedBody.metadata.install_id}`]);
   });
+
+  it("returns 400 for invalid save JSON without forwarding upstream", async () => {
+    const { default: worker } = await import("../../worker/src/index.js");
+    const env = makeEnv();
+    const installToken = await registerInstall(worker, env);
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const response = await worker.fetch(
+      new Request("https://worker.example/contexts", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${installToken}`,
+          "Content-Type": "application/json"
+        },
+        body: "{"
+      }),
+      env
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "Invalid JSON" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("returns 413 for oversized save bodies without forwarding upstream", async () => {
+    const { default: worker } = await import("../../worker/src/index.js");
+    const env = makeEnv();
+    const installToken = await registerInstall(worker, env);
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const response = await worker.fetch(
+      new Request("https://worker.example/contexts", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${installToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ content: "x".repeat(300_000) })
+      }),
+      env
+    );
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({ error: "Request body too large" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not consume the daily cap for unrouted paths", async () => {
+    const { default: worker } = await import("../../worker/src/index.js");
+    let capCalls = 0;
+    const env = makeEnv({
+      incrementAndCheck: async () => {
+        capCalls += 1;
+        return { allowed: true, count: capCalls, remaining: 499 };
+      }
+    });
+    const installToken = await registerInstall(worker, env);
+
+    const response = await worker.fetch(
+      new Request("https://worker.example/unrouted", {
+        headers: {
+          Authorization: `Bearer ${installToken}`
+        }
+      }),
+      env
+    );
+
+    expect(response.status).toBe(404);
+    expect(capCalls).toBe(0);
+  });
 });
 
-function makeEnv(): any {
+async function registerInstall(worker: any, env: any): Promise<string> {
+  const initResponse = await worker.fetch(
+    new Request("https://worker.example/installs", {
+      method: "POST",
+      headers: { "x-nctx-package-secret": "package-secret" }
+    }),
+    env
+  );
+  const initBody = (await initResponse.json()) as { install_token: string };
+  return initBody.install_token;
+}
+
+function makeEnv(
+  options: {
+    incrementAndCheck?: () => Promise<{ allowed: boolean; count: number; remaining: number }>;
+  } = {}
+): any {
   const installs = new Map<string, string>();
   return {
     NIA_API_KEY: "nia-key",
@@ -229,7 +321,8 @@ function makeEnv(): any {
     INSTALL_COUNTER: {
       idFromName: (name: string) => name,
       get: () => ({
-        incrementAndCheck: async () => ({ allowed: true, count: 1, remaining: 499 })
+        incrementAndCheck:
+          options.incrementAndCheck ?? (async () => ({ allowed: true, count: 1, remaining: 499 }))
       })
     },
     IP_RATE_LIMITER: {

@@ -21,6 +21,10 @@ export interface Env {
 }
 
 const PER_INSTALL_DAILY_CAP = 500;
+const NIA_UPSTREAM_TIMEOUT_MS = 15_000;
+export const MAX_SAVE_BODY_BYTES = 256 * 1024;
+
+type AuthedRoute = "save" | "semantic-search" | "text-search";
 
 async function installForToken(env: Env, token: string): Promise<{
   tokenHash: string;
@@ -78,10 +82,13 @@ async function forwardSave(
   env: Env,
   install: { installId: string; installTag: string }
 ): Promise<Response> {
-  const body = isolateContextBody(await request.json(), install);
+  const parsed = await readJsonBody(request);
+  if (!parsed.ok) return parsed.response;
+
+  const body = isolateContextBody(parsed.body, install);
   if (!body) return json({ error: "Invalid context body" }, 400);
 
-  const upstream = await fetch(`${NIA_BASE}/contexts`, {
+  const upstream = await fetchNia(`${NIA_BASE}/contexts`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${env.NIA_API_KEY}`,
@@ -89,32 +96,107 @@ async function forwardSave(
     },
     body: JSON.stringify(body)
   });
+
+  if (!upstream.ok) {
+    return json({ error: "Upstream error", status: upstream.status }, upstream.status >= 500 ? 502 : upstream.status);
+  }
+
   return new Response(upstream.body, {
     status: upstream.status,
     headers: { "Content-Type": upstream.headers.get("Content-Type") || "application/json" }
   });
+}
+
+async function readJsonBody(request: Request): Promise<
+  | { ok: true; body: unknown }
+  | { ok: false; response: Response }
+> {
+  const contentLength = request.headers.get("content-length");
+  if (contentLength) {
+    const parsed = Number(contentLength);
+    if (Number.isFinite(parsed) && parsed > MAX_SAVE_BODY_BYTES) {
+      return { ok: false, response: json({ error: "Request body too large" }, 413) };
+    }
+  }
+
+  const text = await request.text();
+  if (new TextEncoder().encode(text).byteLength > MAX_SAVE_BODY_BYTES) {
+    return { ok: false, response: json({ error: "Request body too large" }, 413) };
+  }
+
+  try {
+    return { ok: true, body: JSON.parse(text) };
+  } catch {
+    return { ok: false, response: json({ error: "Invalid JSON" }, 400) };
+  }
 }
 
 async function forwardSemanticSearch(request: Request, env: Env, installTag: string): Promise<Response> {
   const search = buildSemanticSearchRequest(request.url);
   if (!search) return json({ error: "Missing search query" }, 400);
 
-  const upstream = await fetch(search.upstreamUrl, {
+  const upstream = await fetchNia(search.upstreamUrl, {
     headers: { Authorization: `Bearer ${env.NIA_API_KEY}` }
   });
-  const body = await upstream.json();
+
+  if (!upstream.ok) {
+    return json({ error: "Upstream error", status: upstream.status }, upstream.status >= 500 ? 502 : upstream.status);
+  }
+
+  let body: unknown;
+  try {
+    body = await upstream.json();
+  } catch {
+    return json({ error: "Upstream returned non-JSON response" }, 502);
+  }
+
   return json(filterSemanticSearchResponse(body, installTag, search.requestedLimit), upstream.status);
 }
 
 async function forwardTextSearch(request: Request, env: Env, installTag: string): Promise<Response> {
   const upstreamUrl = buildTextSearchUrl(request.url, installTag);
-  const upstream = await fetch(upstreamUrl, {
+  const upstream = await fetchNia(upstreamUrl, {
     headers: { Authorization: `Bearer ${env.NIA_API_KEY}` }
   });
+
+  if (!upstream.ok) {
+    return json({ error: "Upstream error", status: upstream.status }, upstream.status >= 500 ? 502 : upstream.status);
+  }
+
   return new Response(upstream.body, {
     status: upstream.status,
     headers: { "Content-Type": upstream.headers.get("Content-Type") || "application/json" }
   });
+}
+
+function authedRoute(method: string, pathname: string): AuthedRoute | null {
+  if (method === "POST" && pathname === "/contexts") return "save";
+  if (method === "GET" && pathname === "/contexts/semantic-search") return "semantic-search";
+  if (method === "GET" && pathname === "/contexts/search") return "text-search";
+  return null;
+}
+
+async function fetchNia(input: RequestInfo | URL, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), NIA_UPSTREAM_TIMEOUT_MS);
+
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (isAbortError(error)) {
+      return json({ error: "Nia upstream timed out" }, 504);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 export default {
@@ -127,6 +209,9 @@ export default {
       return registerInstall(request, env);
     }
 
+    const route = authedRoute(request.method, url.pathname);
+    if (!route) return json({ error: "Not found" }, 404);
+
     const token = bearerToken(request);
     if (!token) return json({ error: "Missing bearer token" }, 401);
     const install = await installForToken(env, token);
@@ -134,13 +219,13 @@ export default {
     const capResponse = await checkDailyCap(env, install.tokenHash);
     if (capResponse) return capResponse;
 
-    if (request.method === "POST" && url.pathname === "/contexts") {
+    if (route === "save") {
       return forwardSave(request, env, install);
     }
-    if (request.method === "GET" && url.pathname === "/contexts/semantic-search") {
+    if (route === "semantic-search") {
       return forwardSemanticSearch(request, env, install.installTag);
     }
-    if (request.method === "GET" && url.pathname === "/contexts/search") {
+    if (route === "text-search") {
       return forwardTextSearch(request, env, install.installTag);
     }
     return json({ error: "Not found" }, 404);

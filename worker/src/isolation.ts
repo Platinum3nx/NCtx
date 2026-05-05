@@ -4,6 +4,8 @@ export const AGENT_SOURCE = "nctx-claude-code";
 export const DEFAULT_SEMANTIC_LIMIT = 5;
 export const MAX_SEMANTIC_LIMIT = 100;
 export const SEMANTIC_OVERFETCH_FACTOR = 10;
+export const MAX_TEXT_LIMIT = 100;
+export const MAX_TEXT_OFFSET = 10_000;
 
 export interface InstallIdentity {
   installId: string;
@@ -169,10 +171,39 @@ export function buildTextSearchUrl(requestUrl: string, installTag: string, base 
   const url = new URL(requestUrl);
   const upstreamUrl = new URL(`${base}/contexts/search`);
 
-  for (const [key, value] of url.searchParams) {
-    if (key !== "tags") upstreamUrl.searchParams.append(key, value);
+  const query = url.searchParams.get("q");
+  if (query !== null) upstreamUrl.searchParams.set("q", query);
+
+  copyBoundedIntegerParam(url, upstreamUrl, "limit", 1, MAX_TEXT_LIMIT);
+  copyBoundedIntegerParam(url, upstreamUrl, "offset", 0, MAX_TEXT_OFFSET);
+
+  const includeHighlights = parseBooleanParam(url.searchParams.get("include_highlights"));
+  if (includeHighlights !== null) {
+    upstreamUrl.searchParams.set("include_highlights", includeHighlights);
   }
 
   upstreamUrl.searchParams.set("tags", installTag);
   return upstreamUrl;
+}
+
+function copyBoundedIntegerParam(
+  source: URL,
+  target: URL,
+  key: string,
+  min: number,
+  max: number
+): void {
+  const raw = source.searchParams.get(key);
+  if (raw === null || !/^\d+$/.test(raw)) return;
+
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) return;
+
+  target.searchParams.set(key, String(parsed));
+}
+
+function parseBooleanParam(raw: string | null): string | null {
+  if (raw === null) return null;
+  const normalized = raw.toLowerCase();
+  return normalized === "true" || normalized === "false" ? normalized : null;
 }
