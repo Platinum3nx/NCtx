@@ -13,14 +13,12 @@
     "outDir": "dist",
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "tests/cli/**/*.ts", "tests/nia/**/*.ts", "tsup.config.ts"],
+  "include": ["src/**/*.ts", "tests/cli/**/*.ts", "tests/mcp/**/*.ts", "tests/nia/**/*.ts", "tsup.config.ts"],
   "exclude": [
     "node_modules",
     "dist",
     "worker",
-    "src/mcp",
     "tests/worker",
-    "tests/capture",
-    "tests/mcp"
+    "tests/capture"
   ]
 }

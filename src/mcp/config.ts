@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { findConfigPath } from "../config/load.js";
 
 export interface NctxMcpConfig {
   mode: "hosted";
@@ -11,19 +11,7 @@ export interface NctxMcpConfig {
 }
 
 type JsonObject = Record<string, unknown>;
-
-export function findConfigPath(startDir: string): string | null {
-  let current = resolve(startDir);
-
-  while (true) {
-    const candidate = join(current, ".nctx", "config.json");
-    if (existsSync(candidate)) return candidate;
-
-    const parent = dirname(current);
-    if (parent === current) return null;
-    current = parent;
-  }
-}
+export { findConfigPath };
 
 export function loadConfig(projectDir = process.cwd()): NctxMcpConfig {
   const configPath = findConfigPath(projectDir);

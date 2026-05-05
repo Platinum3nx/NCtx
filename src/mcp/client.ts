@@ -1,31 +1,41 @@
-import { normalizeSearchResultsResponse, type NormalizedSearchResult } from "./format.js";
+import { normalizeSearchResultsResponse, type McpSearchResult } from "./format.js";
 import type { NctxMcpConfig } from "./config.js";
 
 export type MemorySearchMode = "semantic" | "text";
 
 export interface NctxMemoryClient {
-  searchContexts(query: string, limit?: number, mode?: MemorySearchMode): Promise<NormalizedSearchResult[]>;
+  searchContexts(query: string, limit?: number, mode?: MemorySearchMode): Promise<McpSearchResult[]>;
 }
 
 type FetchLike = typeof fetch;
+const DEFAULT_SEARCH_TIMEOUT_MS = 15_000;
 
 export function makeClient(config: NctxMcpConfig, fetchImpl: FetchLike = fetch): NctxMemoryClient {
   return new HostedNctxMemoryClient(config, fetchImpl);
 }
 
 class HostedNctxMemoryClient implements NctxMemoryClient {
-  constructor(private readonly config: NctxMcpConfig, private readonly fetchImpl: FetchLike) {}
+  constructor(
+    private readonly config: NctxMcpConfig,
+    private readonly fetchImpl: FetchLike,
+    private readonly timeoutMs = DEFAULT_SEARCH_TIMEOUT_MS
+  ) {}
 
-  async searchContexts(query: string, limit = 5, mode: MemorySearchMode = "semantic"): Promise<NormalizedSearchResult[]> {
+  async searchContexts(query: string, limit = 5, mode: MemorySearchMode = "semantic"): Promise<McpSearchResult[]> {
     const normalizedLimit = normalizeLimit(limit);
     const url = this.searchUrl(query, normalizedLimit, mode);
 
-    const response = await this.fetchImpl(url, {
-      headers: {
-        Accept: "application/json",
-        Authorization: `Bearer ${this.config.install_token}`
-      }
-    });
+    const response = await fetchWithTimeout(
+      this.fetchImpl,
+      url,
+      {
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${this.config.install_token}`
+        }
+      },
+      this.timeoutMs
+    );
 
     const body = await readResponseBody(response);
     if (!response.ok) {
@@ -50,6 +60,30 @@ class HostedNctxMemoryClient implements NctxMemoryClient {
 function normalizeLimit(limit: number): number {
   if (!Number.isFinite(limit)) return 5;
   return Math.max(1, Math.min(100, Math.trunc(limit)));
+}
+
+async function fetchWithTimeout(
+  fetchImpl: FetchLike,
+  input: RequestInfo | URL,
+  init: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetchImpl(input, {
+      ...init,
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error(`NCtx memory search timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function readResponseBody(response: Response): Promise<unknown> {

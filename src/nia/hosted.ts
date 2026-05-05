@@ -1,6 +1,6 @@
 import type { NctxConfig, ContextDraft, NormalizedSearchResult, SavedContext } from "../types.js";
 import type { NiaClient } from "./client.js";
-import { normalizeSearchResult } from "./client.js";
+import { normalizeSearchResultsResponse } from "./client.js";
 
 const DEFAULT_WORKER_TIMEOUT_MS = 15_000;
 
@@ -35,6 +35,9 @@ export class HostedNiaClient implements NiaClient {
     const url = new URL(`${this.config.proxy_url.replace(/\/$/, "")}${endpoint}`);
     url.searchParams.set("q", query);
     url.searchParams.set("limit", String(limit));
+    if (mode === "semantic") {
+      url.searchParams.set("include_highlights", "true");
+    }
     const res = await fetchWithTimeout(
       this.fetchImpl,
       url,
@@ -47,8 +50,7 @@ export class HostedNiaClient implements NiaClient {
       "Worker search"
     );
     if (!res.ok) throw new Error(`Worker search failed (${res.status}): ${await res.text()}`);
-    const body = (await res.json()) as { results?: SavedContext[]; contexts?: SavedContext[] };
-    return (body.results ?? body.contexts ?? []).map(normalizeSearchResult);
+    return normalizeSearchResultsResponse(await res.json());
   }
 }
 

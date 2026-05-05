@@ -1,65 +1,32 @@
-export interface NormalizedSearchResult {
-  id?: string;
-  title: string;
-  summary: string;
-  content: string;
-  tags: string[];
-  agent_source?: string;
-  memory_type?: string;
-  created_at?: string;
-  metadata: Record<string, unknown>;
-  edited_files: Array<Record<string, unknown>>;
-  score: number | null;
-  highlights: string[];
-  match_metadata: Record<string, unknown>;
+import {
+  normalizeSearchResult as normalizeSharedSearchResult,
+  normalizeSearchResultsResponse as normalizeSharedSearchResultsResponse
+} from "../nia/client.js";
+import type { NormalizedSearchResult } from "../types.js";
+
+export interface McpSearchResult extends NormalizedSearchResult {
   file_paths: string[];
 }
 
-export function normalizeSearchResultsResponse(body: unknown): NormalizedSearchResult[] {
-  if (!isRecord(body)) return [];
-  const rawResults = Array.isArray(body.results)
-    ? body.results
-    : Array.isArray(body.contexts)
-      ? body.contexts
-      : [];
-  return rawResults.map((result) => normalizeSearchResult(result));
+export function normalizeSearchResultsResponse(body: unknown): McpSearchResult[] {
+  return normalizeSharedSearchResultsResponse(body).map(withFilePaths);
 }
 
-export function normalizeSearchResult(raw: unknown): NormalizedSearchResult {
-  const result = isRecord(raw) ? raw : {};
-  const metadata = objectValue(result.metadata);
-  const editedFiles = Array.isArray(result.edited_files) ? result.edited_files.filter(isRecord) : [];
-  const tags = arrayOfStrings(result.tags);
-
-  return {
-    id: stringValue(result.id),
-    title: stringValue(result.title) ?? "(untitled memory)",
-    summary: stringValue(result.summary) ?? "",
-    content: stringValue(result.content) ?? "",
-    tags,
-    agent_source: stringValue(result.agent_source),
-    memory_type: stringValue(result.memory_type),
-    created_at: stringValue(result.created_at),
-    metadata,
-    edited_files: editedFiles,
-    score: numberValue(result.relevance_score ?? result.score),
-    highlights: normalizeHighlights(result.match_highlights ?? result.highlights),
-    match_metadata: objectValue(result.match_metadata),
-    file_paths: collectFilePaths(metadata, editedFiles)
-  };
+export function normalizeSearchResult(raw: unknown): McpSearchResult {
+  return withFilePaths(normalizeSharedSearchResult(raw));
 }
 
 export function formatResults(rawResults: unknown[]): string {
   const results = rawResults.map((result) =>
     isRecord(result) && Array.isArray(result.file_paths)
-      ? (result as unknown as NormalizedSearchResult)
+      ? (result as unknown as McpSearchResult)
       : normalizeSearchResult(result)
   );
   if (!results.length) return "No NCtx memories found.";
   return results.map((result, index) => formatOne(result, index + 1)).join("\n\n---\n\n");
 }
 
-function formatOne(result: NormalizedSearchResult, index: number): string {
+function formatOne(result: McpSearchResult, index: number): string {
   const visible = visibleTags(result.tags);
   const lines = [
     `# ${index}. ${result.title}`,
@@ -75,35 +42,15 @@ function formatOne(result: NormalizedSearchResult, index: number): string {
   return lines.join("\n");
 }
 
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
-}
-
-function numberValue(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
-  return null;
-}
-
-function arrayOfStrings(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-}
-
-function normalizeHighlights(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item) => {
-    if (typeof item === "string") return [item];
-    if (isRecord(item) && typeof item.text === "string") return [item.text];
-    return [];
-  });
-}
-
-function objectValue(value: unknown): Record<string, unknown> {
-  return isRecord(value) ? value : {};
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function withFilePaths(result: NormalizedSearchResult): McpSearchResult {
+  return {
+    ...result,
+    file_paths: collectFilePaths(result.metadata, result.edited_files)
+  };
 }
 
 function collectFilePaths(metadata: Record<string, unknown>, editedFiles: Array<Record<string, unknown>>): string[] {
