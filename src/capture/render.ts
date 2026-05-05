@@ -1,8 +1,9 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import YAML from "yaml";
 import type { ContextDraft, ExtractionResult, HookInput, Trigger } from "../types.js";
 import { ensureDir, memoryDir } from "../lib/fs.js";
+import { withFileLock } from "../lib/lock.js";
 
 export type MemoryFileOptions = {
   captureId: string;
@@ -32,18 +33,22 @@ export async function backfillMemoryContextIds(
   const entries = Object.entries(contextIds).filter(([, id]) => Boolean(id));
   if (!entries.length) return;
 
-  const raw = await readFile(memoryPath, "utf8");
-  const match = raw.match(/^---\n([\s\S]*?)\n---\n/);
-  if (!match) return;
+  await withFileLock(`${memoryPath}.lock`, async () => {
+    const raw = await readFile(memoryPath, "utf8");
+    const match = raw.match(/^---\n([\s\S]*?)\n---\n/);
+    if (!match) return;
 
-  const frontmatter = YAML.parse(match[1]) as Record<string, unknown>;
-  frontmatter.context_ids = {
-    ...(isRecord(frontmatter.context_ids) ? frontmatter.context_ids : {}),
-    ...Object.fromEntries(entries)
-  };
+    const frontmatter = YAML.parse(match[1]) as Record<string, unknown>;
+    frontmatter.context_ids = {
+      ...(isRecord(frontmatter.context_ids) ? frontmatter.context_ids : {}),
+      ...Object.fromEntries(entries)
+    };
 
-  const next = `---\n${YAML.stringify(frontmatter).trim()}\n---\n${raw.slice(match[0].length)}`;
-  await writeFile(memoryPath, next, "utf8");
+    const next = `---\n${YAML.stringify(frontmatter).trim()}\n---\n${raw.slice(match[0].length)}`;
+    const tempPath = `${memoryPath}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(tempPath, next, "utf8");
+    await rename(tempPath, memoryPath);
+  });
 }
 
 export function renderMemoryMarkdown(options: MemoryFileOptions): string {
