@@ -3,7 +3,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { registerHooks } from "../config/hooks.js";
 import { registerMcpServer } from "../config/mcp-register.js";
-import { createHostedConfig, ensureNctxDirs, saveConfig } from "../config/load.js";
+import { createHostedConfig, ensureNctxDirs, saveConfig, tryLoadConfig } from "../config/load.js";
 import { ensureDir, memoryDir, nctxDir, pendingDir, sessionsDir } from "../lib/fs.js";
 import { DEFAULT_PROXY_URL, PACKAGE_NAME, PACKAGE_SHARED_SECRET } from "../lib/constants.js";
 import { registerHostedInstall } from "../nia/hosted.js";
@@ -14,13 +14,19 @@ type InitOptions = {
   packageSecret?: string;
   installToken?: string;
   projectName?: string;
+  rotateToken?: boolean;
   skipHooks?: boolean;
   skipMcp?: boolean;
   skipVerify?: boolean;
 };
 
-export async function runInit(cwd: string, options: InitOptions): Promise<void> {
-  const proxyUrl = options.proxyUrl ?? process.env.NCTX_PROXY_URL ?? DEFAULT_PROXY_URL;
+export type InitResult = {
+  tokenAction: "reused" | "minted" | "rotated" | "explicit";
+};
+
+export async function runInit(cwd: string, options: InitOptions): Promise<InitResult> {
+  const existingConfig = await tryLoadConfig(cwd);
+  const proxyUrl = options.proxyUrl ?? existingConfig?.proxy_url ?? process.env.NCTX_PROXY_URL ?? DEFAULT_PROXY_URL;
   const packageSecret =
     options.packageSecret ??
     process.env.NCTX_PACKAGE_SHARED_SECRET ??
@@ -33,17 +39,34 @@ export async function runInit(cwd: string, options: InitOptions): Promise<void> 
   await ensureDir(pendingDir(cwd));
   await ensureDir(sessionsDir(cwd));
 
-  const installToken = options.installToken ?? (await mintInstall(proxyUrl, packageSecret));
+  let installToken: string;
+  let tokenAction: InitResult["tokenAction"];
+
+  if (options.installToken) {
+    installToken = options.installToken;
+    tokenAction = "explicit";
+  } else if (options.rotateToken) {
+    installToken = await mintInstall(proxyUrl, packageSecret);
+    tokenAction = "rotated";
+  } else if (existingConfig?.install_token) {
+    installToken = existingConfig.install_token;
+    tokenAction = "reused";
+  } else {
+    installToken = await mintInstall(proxyUrl, packageSecret);
+    tokenAction = "minted";
+  }
+
   const config: NctxConfig = createHostedConfig({
     installToken,
     proxyUrl,
-    projectName: options.projectName ?? projectNameFromCwd(cwd),
+    projectName: options.projectName ?? existingConfig?.project_name ?? projectNameFromCwd(cwd),
     projectRoot: cwd
   });
   await saveConfig(cwd, config);
   if (!options.skipHooks) await registerHooks(cwd);
   if (!options.skipMcp) await registerMcpServer({ packageName: PACKAGE_NAME });
   await ensureGitignore(cwd);
+  return { tokenAction };
 }
 
 async function mintInstall(proxyUrl: string, packageSecret: string): Promise<string> {

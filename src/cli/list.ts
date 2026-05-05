@@ -13,15 +13,7 @@ export async function runList(cwd: string): Promise<void> {
   }
 }
 
-export async function runView(cwd: string, id: string): Promise<void> {
-  const dir = memoryDir(cwd);
-  const entries = (await readdir(dir).catch(() => [])).filter((entry) => entry.includes(id) && entry.endsWith(".md"));
-  if (!entries.length) throw new Error(`No memory matched ${id}`);
-  console.log(await readFile(join(dir, entries[0]), "utf8"));
-}
-
 function parseFrontmatter(raw: string): Record<string, unknown> {
   const match = raw.match(/^---\n([\s\S]*?)\n---\n/);
   return match ? (YAML.parse(match[1]) as Record<string, unknown>) : {};
 }
-

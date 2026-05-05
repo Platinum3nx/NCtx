@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { NctxConfig } from "../types.js";
 import { memoryDir, nctxDir, pendingDir, readJson, sessionsDir, writeJson, ensureDir } from "../lib/fs.js";
 
@@ -18,6 +18,19 @@ const FORBIDDEN_HOSTED_CONFIG_KEYS = new Set([
 
 export function configPath(cwd: string): string {
   return join(nctxDir(cwd), "config.json");
+}
+
+export function findConfigPath(startDir: string): string | null {
+  let current = resolve(startDir);
+
+  while (true) {
+    const candidate = configPath(current);
+    if (existsSync(candidate)) return candidate;
+
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
 }
 
 export function memoriesDir(cwd: string): string {
@@ -56,9 +69,9 @@ export function createHostedConfig(input: {
 }
 
 export async function loadConfig(cwd = process.cwd()): Promise<NctxConfig> {
-  const path = configPath(cwd);
-  if (!existsSync(path)) {
-    throw new Error(`NCtx config not found at ${path}. Run nctx init first.`);
+  const path = findConfigPath(cwd);
+  if (!path) {
+    throw new Error(`NCtx config not found at ${configPath(cwd)} or any parent directory. Run nctx init first.`);
   }
   const config = await readJson<NctxConfig>(path);
   const validation = validateConfig(config);
