@@ -15,6 +15,8 @@ Implemented:
 - Robust JSONL transcript parsing with tool-output stripping and a compact tool action ledger.
 - `CLAUDE.md` dedupe preamble for extraction.
 - `claude -p` extraction with feature-detected safe flags.
+- Runtime validation for Claude extraction envelopes, so wrapper metadata is not saved as memory.
+- UTF-8-safe `CLAUDE.md` byte capping for prompt budgeting.
 - Memory splitting into `fact`, `procedural`, and `episodic` Nia contexts.
 - Hosted Worker proxy with per-install bearer tokens and tag-based isolation.
 - Durable Object per-install daily caps and Cloudflare Rate Limiting binding.
@@ -44,6 +46,35 @@ cd /Users/arjunmalghan/NCtx
 npm install
 npm run build
 ```
+
+## Install As A Claude Code Plugin
+
+After the package is published:
+
+```bash
+claude plugin marketplace add ./path/to/marketplace
+claude plugin install nctx@nctx-marketplace
+```
+
+For local plugin development from this checkout:
+
+```bash
+claude plugin validate .
+```
+
+Once the plugin is installed in a project, initialize NCtx project state:
+
+```bash
+/nctx
+```
+
+or run the plugin CLI directly:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/dist/cli/index.js" init --plugin
+```
+
+Plugin mode writes `.nctx/config.json` only. Hooks and MCP are supplied by the plugin package.
 
 Initialize a project against the deployed beta Worker:
 
@@ -100,11 +131,13 @@ It must not store `install_id`, `shared_secret`, or a Nia API key.
 
 ```bash
 nctx init       # initialize hooks, config, and MCP registration
+nctx init --rotate-token # mint a fresh install token instead of reusing config
+nctx init --plugin # initialize config only when installed as a Claude Code plugin
 nctx capture    # run from Claude Code hook JSON on stdin
 nctx mcp        # run local MCP server on stdio
-nctx doctor     # inspect config, hooks, Claude flags, and MCP health
+nctx doctor [--no-worker-live] # inspect config, hooks, Claude flags, MCP, and Worker health
 nctx list       # list local memory files
-nctx view <id>  # show a local memory file
+nctx view <id> [--json] # show a local memory file
 nctx reindex    # drain pending writes and re-push local memory files
 nctx uninstall  # remove NCtx hooks and MCP registration
 ```
@@ -125,10 +158,15 @@ NCtx registers only:
 Both are async and guarded:
 
 ```sh
-if [ "$NCTX_INTERNAL" = "1" ]; then exit 0; fi; npx -y @arjunmalghan/nctx capture --trigger=session-end
+if [ "$NCTX_INTERNAL" = "1" ]; then exit 0; fi; npx -y @platinum3nx/nctx capture --trigger=session-end
 ```
 
 `Stop` is intentionally not used because it fires after every assistant turn.
+
+Capture has two safety ceilings:
+
+- `NCTX_CAPTURE_STDIN_TIMEOUT_MS` controls how long capture waits for hook JSON on stdin. Default: `10000`.
+- `NCTX_TRANSCRIPT_TEXT_MAX_CHARS` caps Claude-bound transcript text while preserving recent text and a compact tool ledger. Default: `80000`.
 
 ## Memory Types
 
@@ -141,6 +179,8 @@ Each capture can emit up to three Nia contexts:
 | current state + next steps | `episodic` |
 
 Empty categories produce no placeholder contexts.
+
+Short real memories are expanded only with memory-specific details such as session summary, project, files, and tags so they satisfy Nia content minimums without generic semantic-search filler.
 
 ## Development Checks
 

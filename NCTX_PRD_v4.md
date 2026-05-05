@@ -101,7 +101,7 @@ A Claude Code plugin that auto-captures session-derived knowledge and indexes it
 
 ```bash
 $ cd ~/projects/aletheia
-$ npx -y @arjunmalghan/nctx init
+$ npx -y @platinum3nx/nctx init
 
 NCtx - persistent memory for Claude Code sessions
 
@@ -381,7 +381,7 @@ Hooks are configured in `.claude/settings.json`. NCtx uses command hooks with `a
         "hooks": [
           {
             "type": "command",
-            "command": "if [ \"$NCTX_INTERNAL\" = \"1\" ]; then exit 0; fi; npx -y @arjunmalghan/nctx capture --trigger=session-end",
+            "command": "if [ \"$NCTX_INTERNAL\" = \"1\" ]; then exit 0; fi; npx -y @platinum3nx/nctx capture --trigger=session-end",
             "async": true,
             "timeout": 60
           }
@@ -393,7 +393,7 @@ Hooks are configured in `.claude/settings.json`. NCtx uses command hooks with `a
         "hooks": [
           {
             "type": "command",
-            "command": "if [ \"$NCTX_INTERNAL\" = \"1\" ]; then exit 0; fi; npx -y @arjunmalghan/nctx capture --trigger=precompact",
+            "command": "if [ \"$NCTX_INTERNAL\" = \"1\" ]; then exit 0; fi; npx -y @platinum3nx/nctx capture --trigger=precompact",
             "async": true,
             "timeout": 60
           }
@@ -458,10 +458,17 @@ For `PreCompact`:
 ```typescript
 import { stdin } from "node:process";
 
-async function readStdin(): Promise<string> {
+async function readStdin(timeoutMs = 10_000): Promise<string> {
   let data = "";
-  for await (const chunk of stdin) data += chunk;
-  return data;
+  const timeout = setTimeout(() => {
+    throw new Error(`Timed out waiting for hook JSON on stdin after ${timeoutMs}ms.`);
+  }, timeoutMs);
+  try {
+    for await (const chunk of stdin) data += chunk;
+    return data;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 if (process.env.NCTX_INTERNAL === "1") {
@@ -613,6 +620,8 @@ function renderToolActionLedger(actions: ToolAction[]): string {
 
 **Tracking incremental position:** store per-session pointers at `.nctx/sessions/<session_id>.pos`. Each file stores the last processed line number for that session. Do not use one global `last_session.txt`; concurrent sessions in the same project can race.
 
+**Runtime hardening:** parse JSONL as a stream rather than reading the full file into memory. Cap Claude-bound transcript text with `NCTX_TRANSCRIPT_TEXT_MAX_CHARS` (default `80000`) by keeping the most recent text while preserving the compact tool-action ledger. Wrap each session capture in a per-session file lock at `.nctx/sessions/<session_id>.lock`, and write cursor files atomically through a temp-file rename.
+
 ### 7.3 `claude -p` headless mode
 
 Documentation: https://code.claude.com/docs/en/headless and https://code.claude.com/docs/en/cli-reference
@@ -631,7 +640,7 @@ NCtx invokes `claude -p` to extract structured memory from a transcript. Critica
 
 Do not use `--allowedTools ""` to disable tools. That flag controls automatic approval of allowed tools; it is not the same as making no tools available. Do not use `--bare-no`; it does not exist.
 
-Flag availability varies by Claude Code version. On startup, `nctx capture` should call `claude --help` once, cache the supported flags for the process, and build args defensively:
+Flag availability varies by Claude Code version. On startup, `nctx capture` should call `claude --help` once, cache the supported flags for the process, and build args defensively. If `claude` cannot be spawned, NCtx should report that Claude Code is not installed or not on `PATH`; if `claude --help` exits unsuccessfully, NCtx should report that capability detection failed and include the help command stderr.
 
 ```typescript
 import { execFileSync, spawn } from "node:child_process";
@@ -642,13 +651,12 @@ function getClaudeCapabilities(): {
   hasJsonSchema: boolean;
   hasModel: boolean;
 } {
-  const help = execFileSync("claude", ["--help"], { encoding: "utf8" });
-  return {
-    hasTools: help.includes("--tools"),
-    hasNoSessionPersistence: help.includes("--no-session-persistence"),
-    hasJsonSchema: help.includes("--json-schema"),
-    hasModel: help.includes("--model")
-  };
+  try {
+    const help = execFileSync("claude", ["--help"], { encoding: "utf8" });
+    return capabilitiesFromHelp(help);
+  } catch (error) {
+    throw new Error("Claude Code CLI is not installed/help failed; see stderr for details.");
+  }
 }
 
 function buildClaudeArgs(schema: object): string[] {
@@ -689,7 +697,8 @@ function extractWithClaude(fullPrompt: string, schema: object): Promise<any> {
       }
       try {
         const parsed = JSON.parse(stdout);
-        resolve(parsed.structured_output ?? JSON.parse(parsed.result));
+        const candidate = parsed.structured_output ?? parsed.result ?? parsed;
+        resolve(validateExtractionShape(typeof candidate === "string" ? JSON.parse(candidate) : candidate));
       } catch {
         reject(new Error(`Bad JSON from claude -p: ${stdout.slice(0, 500)}`));
       }
@@ -705,13 +714,14 @@ If a flag is missing, the script should continue with the best safe fallback and
 
 ### 7.4 The extraction prompt and schema
 
-Before extraction, NCtx reads the project root `CLAUDE.md` if it exists, caps it at 4KB, and passes it as existing memory. The extractor is instructed not to duplicate it verbatim.
+Before extraction, NCtx reads the project root `CLAUDE.md` if it exists, caps it at 4KB without splitting multi-byte UTF-8 characters, and passes it as existing memory. The extractor is instructed not to duplicate it verbatim.
 
 ```typescript
 function readClaudeMd(cwd: string): string {
   const path = join(cwd, "CLAUDE.md");
   if (!existsSync(path)) return "";
-  return readFileSync(path, "utf8").slice(0, 4096);
+  const bytes = readFileSync(path);
+  return bytes.subarray(0, safeUtf8ByteCap(bytes, 4096)).toString("utf8");
 }
 ```
 
@@ -862,7 +872,7 @@ Field constraints:
 
 - `title`: 1-200 chars, required.
 - `summary`: 10-1000 chars, required.
-- `content`: minimum 50 chars, required.
+- `content`: minimum 50 chars, required. If a real extracted memory is shorter, NCtx pads with memory-specific details such as session summary, project, files, tags, and memory focus, not generic filler.
 - `agent_source`: required. The Worker always forces `"nctx-claude-code"`.
 - `memory_type`: `scratchpad`, `episodic`, `fact`, or `procedural`. NCtx always sends it.
 - `ttl_seconds`: optional custom TTL. NCtx does not set it in v4; it uses Nia defaults for the selected memory type.
@@ -1076,6 +1086,7 @@ const NIA_BASE = "https://apigcp.trynia.ai/v2";
 const PER_INSTALL_DAILY_CAP = 500;
 const TOKEN_PREFIX = "nctx_it_";
 const AGENT_SOURCE = "nctx-claude-code";
+const MAX_SAVE_BODY_BYTES = 256 * 1024;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -1195,8 +1206,38 @@ async function registerInstall(request: Request, env: Env): Promise<Response> {
   return json({ install_token: token });
 }
 
+async function readJsonBody(request: Request): Promise<
+  | { ok: true; body: any }
+  | { ok: false; response: Response }
+> {
+  const contentLength = request.headers.get("content-length");
+  if (contentLength) {
+    const parsed = Number(contentLength);
+    if (Number.isFinite(parsed) && parsed > MAX_SAVE_BODY_BYTES) {
+      return { ok: false, response: json({ error: "Request body too large" }, 413) };
+    }
+  }
+
+  const text = await request.text();
+  if (new TextEncoder().encode(text).byteLength > MAX_SAVE_BODY_BYTES) {
+    return { ok: false, response: json({ error: "Request body too large" }, 413) };
+  }
+
+  try {
+    return { ok: true, body: JSON.parse(text) };
+  } catch {
+    return { ok: false, response: json({ error: "Invalid JSON" }, 400) };
+  }
+}
+
 async function forwardSave(request: Request, env: Env, install: { installId: string; installTag: string }): Promise<Response> {
-  const body = await request.json<any>();
+  const parsed = await readJsonBody(request);
+  if (!parsed.ok) return parsed.response;
+
+  const body = parsed.body;
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return json({ error: "Invalid context body" }, 400);
+  }
 
   body.tags = sanitizeAndInjectTags(body.tags, install.installTag);
   body.agent_source = AGENT_SOURCE;
@@ -1253,9 +1294,21 @@ async function forwardSemanticSearch(request: Request, env: Env, installTag: str
 async function forwardTextSearch(request: Request, env: Env, installTag: string): Promise<Response> {
   const url = new URL(request.url);
   const upstreamUrl = new URL(`${NIA_BASE}/contexts/search`);
-  for (const [key, value] of url.searchParams) {
-    if (key !== "tags") upstreamUrl.searchParams.append(key, value);
+
+  const q = url.searchParams.get("q");
+  if (q !== null) upstreamUrl.searchParams.set("q", q);
+
+  const limit = boundedInteger(url.searchParams.get("limit"), 1, 100);
+  if (limit !== null) upstreamUrl.searchParams.set("limit", String(limit));
+
+  const offset = boundedInteger(url.searchParams.get("offset"), 0, 10000);
+  if (offset !== null) upstreamUrl.searchParams.set("offset", String(offset));
+
+  const includeHighlights = url.searchParams.get("include_highlights");
+  if (includeHighlights === "true" || includeHighlights === "false") {
+    upstreamUrl.searchParams.set("include_highlights", includeHighlights);
   }
+
   upstreamUrl.searchParams.set("tags", installTag);
 
   const upstream = await fetch(upstreamUrl, {
@@ -1266,6 +1319,19 @@ async function forwardTextSearch(request: Request, env: Env, installTag: string)
     status: upstream.status,
     headers: { "Content-Type": upstream.headers.get("Content-Type") || "application/json" }
   });
+}
+
+function boundedInteger(raw: string | null, min: number, max: number): number | null {
+  if (raw === null || !/^\d+$/.test(raw)) return null;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : null;
+}
+
+function authedRoute(method: string, pathname: string): "save" | "semantic-search" | "text-search" | null {
+  if (method === "POST" && pathname === "/contexts") return "save";
+  if (method === "GET" && pathname === "/contexts/semantic-search") return "semantic-search";
+  if (method === "GET" && pathname === "/contexts/search") return "text-search";
+  return null;
 }
 
 export default {
@@ -1279,6 +1345,9 @@ export default {
       return registerInstall(request, env);
     }
 
+    const route = authedRoute(request.method, url.pathname);
+    if (!route) return json({ error: "Not found" }, 404);
+
     const token = bearerToken(request);
     if (!token) return json({ error: "Missing bearer token" }, 401);
 
@@ -1288,15 +1357,15 @@ export default {
     const capResponse = await checkDailyCap(env, install.tokenHash);
     if (capResponse) return capResponse;
 
-    if (request.method === "POST" && url.pathname === "/contexts") {
+    if (route === "save") {
       return forwardSave(request, env, install);
     }
 
-    if (request.method === "GET" && url.pathname === "/contexts/semantic-search") {
+    if (route === "semantic-search") {
       return forwardSemanticSearch(request, env, install.installTag);
     }
 
-    if (request.method === "GET" && url.pathname === "/contexts/search") {
+    if (route === "text-search") {
       return forwardTextSearch(request, env, install.installTag);
     }
 
@@ -1381,10 +1450,10 @@ NCtx ships an MCP server that Claude Code launches as a subprocess. Registration
 ```bash
 # Local-scope registration via Claude CLI. This loads only for the current
 # project path but is stored privately in ~/.claude.json, not committed.
-claude mcp add-json --scope local "nctx" '{"type":"stdio","command":"npx","args":["-y","@arjunmalghan/nctx","mcp"]}'
+claude mcp add-json --scope local "nctx" '{"type":"stdio","command":"npx","args":["-y","@platinum3nx/nctx","mcp"]}'
 
 # If a user explicitly wants a shared project .mcp.json, use:
-claude mcp add-json --scope project "nctx" '{"type":"stdio","command":"npx","args":["-y","@arjunmalghan/nctx","mcp"]}'
+claude mcp add-json --scope project "nctx" '{"type":"stdio","command":"npx","args":["-y","@platinum3nx/nctx","mcp"]}'
 ```
 
 Manual `.mcp.json` project-scoped format:
@@ -1395,7 +1464,7 @@ Manual `.mcp.json` project-scoped format:
     "nctx": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@arjunmalghan/nctx", "mcp"]
+      "args": ["-y", "@platinum3nx/nctx", "mcp"]
     }
   }
 }
@@ -1511,13 +1580,13 @@ nctx/
 
 ```json
 {
-  "name": "@arjunmalghan/nctx",
+  "name": "@platinum3nx/nctx",
   "version": "0.1.0",
   "type": "module",
   "bin": {
-    "nctx": "./dist/cli/index.js"
+    "nctx": "dist/cli/index.js"
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": ["dist", ".claude-plugin", "hooks", "skills", ".mcp.json", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
@@ -1526,11 +1595,12 @@ nctx/
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
     "yaml": "^2.6.0",
-    "yargs": "^17.7.2"
+    "yargs": "^18.0.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260504.1",
     "@types/node": "^22.0.0",
+    "@types/yargs": "^17.0.35",
     "tsup": "^8.0.0",
     "typescript": "^5.5.0",
     "vitest": "^2.0.0",
@@ -1548,7 +1618,7 @@ Scenario: Fresh hosted install on Aletheia project, run a session, recall in a f
 ```bash
 # Day 1, 2:00 PM - Install
 $ cd ~/projects/aletheia
-$ npx -y @arjunmalghan/nctx init
+$ npx -y @platinum3nx/nctx init
 [interactive output as in section 4.1]
 
 # During init:
@@ -1567,7 +1637,7 @@ $ claude
 
 # Behind the scenes:
 # 1. SessionEnd hook fires once, runs:
-#      npx -y @arjunmalghan/nctx capture --trigger=session-end
+#      npx -y @platinum3nx/nctx capture --trigger=session-end
 # 2. nctx capture confirms NCTX_INTERNAL is not set.
 # 3. Hook input provides transcript_path, session_id, cwd, and reason.
 # 4. Parser reads only new JSONL lines for this session.
@@ -1629,10 +1699,11 @@ If that final response works, the product is done. Everything else is polish.
 | Component | Role |
 |---|---|
 | `nctx init` | Set up `.nctx/`, register hosted install, register hooks + MCP, verify connectivity. |
+| `nctx init --rotate-token` | Mint a fresh hosted install token instead of reusing the existing project token. |
 | `nctx capture` | Run by `SessionEnd` and `PreCompact` hooks. Parse transcript, extract via `claude -p`, write local md, push typed contexts to Nia through Worker. |
 | `nctx mcp` | MCP server run by Claude Code. Exposes `nctx_memory` tool. |
-| `nctx doctor` | Verify config, hooks, MCP registration, Claude flag support, recursion guard, network, and hosted tag isolation. |
-| `nctx list` / `view` | Browse local memories. |
+| `nctx doctor [--no-worker-live]` | Verify config, hooks, MCP registration, Claude flag support, recursion guard, network, and hosted tag isolation. |
+| `nctx list` / `view [--json]` | Browse local memories. |
 | `nctx reindex` | Re-push all local memories, preserving memory-type splitting. |
 | `nctx uninstall` | Reverse `init` cleanly. |
 | `worker/` | Cloudflare Worker proxy, install-token minting, tag injection/filtering, Durable Object counters. |
@@ -1769,7 +1840,7 @@ This is the most important phase. The product cannot succeed if extraction produ
 
 - Publish `nctx` to npm (build via `tsup`, includes `dist/`).
 - Implement `nctx doctor`: checks config validity, hook registration, recursion guard, Claude flag support, MCP registration, Worker reachability, and hosted tag isolation.
-- Implement `nctx list` and `nctx view <id>`.
+- Implement `nctx list` and `nctx view <id> [--json]`.
 - Implement `nctx reindex` preserving memory type splitting.
 - Implement `nctx uninstall` - removes hooks entries, MCP entry, optionally `.nctx/`.
 - Write README with: 30-second pitch, install command, hosted beta explanation, install-token privacy model, tag-based isolation model, proxy stores no content, link to source.
@@ -1777,7 +1848,7 @@ This is the most important phase. The product cannot succeed if extraction produ
 
 **Acceptance tests:**
 
-1. Stranger can `npx -y @arjunmalghan/nctx init` and reach a working hosted install without consulting anything beyond the README.
+1. Stranger can `npx -y @platinum3nx/nctx init` and reach a working hosted install without consulting anything beyond the README.
 2. `nctx doctor` correctly detects: missing config, missing hooks, missing recursion guard, missing MCP entry, unsupported Claude flags, Worker unreachable, and Worker isolation failure.
 3. `nctx uninstall` removes all NCtx artifacts cleanly; a CC session afterward shows no NCtx hooks/MCP.
 
