@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHostedConfig, saveConfig } from "../../src/config/load.js";
 import { readMemoryFrontmatter, runReindex } from "../../src/cli/reindex.js";
-import { memoryDir } from "../../src/lib/fs.js";
+import { memoryDir, pendingDir } from "../../src/lib/fs.js";
 import { HostedNiaClient, registerHostedInstall } from "../../src/nia/hosted.js";
 import { normalizeSearchResult } from "../../src/nia/client.js";
 import { drainPendingContexts, enqueuePendingContext, listPendingContexts, queuePending } from "../../src/lib/pending.js";
@@ -195,8 +195,88 @@ describe("pending queue", () => {
     expect(remaining[0].draft.memory_type).toBe("procedural");
   });
 
+  it("continues draining valid pending files when one pending file is corrupt", async () => {
+    const root = await tempRoot();
+    await enqueuePendingContext(root, {
+      captureId: "capture:good",
+      memoryType: "fact",
+      request: {
+        title: "Good",
+        summary: "Good request",
+        content: "Good content that is long enough for the pending queue test.",
+        memory_type: "fact"
+      }
+    });
+    const corruptPath = path.join(pendingDir(root), "capture-corrupt.fact.json");
+    await writeFile(corruptPath, "{not-json", "utf8");
+
+    expect(await listPendingContexts(root)).toHaveLength(1);
+    const drained = await drainPendingContexts(root, {
+      async saveContext(request) {
+        return { id: `ctx_${request.memory_type}` };
+      },
+      async searchContexts() {
+        return [];
+      }
+    });
+
+    expect(drained.saved).toHaveLength(1);
+    expect(drained.failed).toHaveLength(1);
+    expect(path.basename(drained.failed[0].file_path)).toBe("capture-corrupt.fact.json");
+    await expect(readFile(corruptPath, "utf8")).resolves.toBe("{not-json");
+    expect(await listPendingContexts(root)).toHaveLength(0);
+  });
+
+  it("serializes concurrent drains so one pending file is saved once", async () => {
+    const root = await tempRoot();
+    await enqueuePendingContext(root, {
+      captureId: "capture:serialized",
+      memoryType: "episodic",
+      request: {
+        title: "Serialized",
+        summary: "Serialized request",
+        content: "Serialized content that is long enough for the pending queue test.",
+        memory_type: "episodic"
+      }
+    });
+    let releaseFirst!: () => void;
+    const releaseFirstPromise = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let firstStarted!: () => void;
+    const firstSaveStarted = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    let saves = 0;
+    const client = {
+      async saveContext(request: any) {
+        saves += 1;
+        firstStarted();
+        await releaseFirstPromise;
+        return { id: `ctx_${request.memory_type}` };
+      },
+      async searchContexts() {
+        return [];
+      }
+    };
+
+    const first = drainPendingContexts(root, client);
+    await firstSaveStarted;
+    const second = drainPendingContexts(root, client);
+    await sleep(30);
+
+    expect(saves).toBe(1);
+    releaseFirst();
+    const results = await Promise.all([first, second]);
+
+    expect(results.flatMap((result) => result.saved)).toHaveLength(1);
+    expect(saves).toBe(1);
+    expect(await listPendingContexts(root)).toHaveLength(0);
+  });
+
   it("reindexes local memory files and backfills per-memory-type context ids", async () => {
     const root = await tempRoot();
+    const nested = path.join(root, "packages", "app");
     await saveConfig(
       root,
       createHostedConfig({
@@ -207,6 +287,7 @@ describe("pending queue", () => {
       })
     );
 
+    await mkdir(nested, { recursive: true });
     await mkdir(memoryDir(root), { recursive: true });
     const memoryPath = path.join(memoryDir(root), "capture-1.md");
     await writeFile(
@@ -246,7 +327,7 @@ describe("pending queue", () => {
       return Response.json({ id: `ctx_${body.memory_type}` });
     });
 
-    await runReindex(root);
+    await runReindex(nested);
 
     expect(bodies.map((body) => body.memory_type)).toEqual(["fact", "procedural", "episodic"]);
     expect(bodies.flatMap((body) => body.tags)).not.toContain("install:spoofed");
@@ -256,6 +337,10 @@ describe("pending queue", () => {
       procedural: "ctx_procedural",
       episodic: "ctx_episodic"
     });
+
+    bodies.length = 0;
+    await runReindex(root);
+    expect(bodies).toHaveLength(0);
   });
 
   it("backfills memory frontmatter when reindex drains queued pending contexts", async () => {
@@ -282,11 +367,11 @@ describe("pending queue", () => {
         'project: "demo"',
         "files_touched: []",
         'tags: ["project:demo"]',
-        "memory_types: []",
+        'memory_types: ["fact"]',
         'summary: "Pending memory"',
         "---",
         "",
-        "## Summary",
+        "## Decision: Pending fact",
         "",
         "Pending-only memory."
       ].join("\n"),
@@ -306,15 +391,100 @@ describe("pending queue", () => {
       { memoryPath }
     );
 
+    const bodies: any[] = [];
     vi.stubGlobal("fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));
+      bodies.push(body);
       return Response.json({ id: `ctx_${body.memory_type}` });
     });
 
     await runReindex(root);
 
+    expect(bodies.map((body) => body.memory_type)).toEqual(["fact"]);
     expect(await listPendingContexts(root)).toHaveLength(0);
     const frontmatter = await readMemoryFrontmatter(memoryPath);
     expect(frontmatter.context_ids).toEqual({ fact: "ctx_fact" });
   });
+
+  it("backfills successful reindex saves and queues failed memory types", async () => {
+    const root = await tempRoot();
+    await saveConfig(
+      root,
+      createHostedConfig({
+        installToken: "nctx_it_hosted_install_token_long_enough",
+        proxyUrl: "https://worker.example",
+        projectName: "demo",
+        projectRoot: root
+      })
+    );
+    await mkdir(memoryDir(root), { recursive: true });
+    const memoryPath = path.join(memoryDir(root), "capture-partial.md");
+    await writeFile(
+      memoryPath,
+      [
+        "---",
+        'id: "capture-partial"',
+        "context_ids:",
+        'session_id: "session-1"',
+        'trigger: "session-end"',
+        'project: "demo"',
+        'files_touched: ["src/app.ts"]',
+        'tags: ["project:demo"]',
+        'memory_types: ["fact", "procedural"]',
+        'summary: "Partial memory"',
+        "---",
+        "",
+        "## Decision: Keep successes",
+        "",
+        "Successful reindex saves should be backfilled.",
+        "",
+        "## Pattern: Queue failures",
+        "",
+        "Failed memory types should stay pending."
+      ].join("\n"),
+      "utf8"
+    );
+
+    const firstBodies: any[] = [];
+    vi.stubGlobal("fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      firstBodies.push(body);
+      if (body.memory_type === "procedural") {
+        return new Response("temporarily down", { status: 503 });
+      }
+      return Response.json({ id: `ctx_${body.memory_type}` });
+    });
+
+    await runReindex(root);
+
+    expect(firstBodies.map((body) => body.memory_type)).toEqual(["fact", "procedural"]);
+    let frontmatter = await readMemoryFrontmatter(memoryPath);
+    expect(frontmatter.context_ids).toEqual({ fact: "ctx_fact" });
+    let remaining = await listPendingContexts(root);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]).toMatchObject({
+      id: "capture-partial",
+      memory_path: memoryPath,
+      draft: { memory_type: "procedural" }
+    });
+
+    const secondBodies: any[] = [];
+    vi.stubGlobal("fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      secondBodies.push(body);
+      return Response.json({ id: `ctx_${body.memory_type}` });
+    });
+
+    await runReindex(root);
+
+    expect(secondBodies.map((body) => body.memory_type)).toEqual(["procedural"]);
+    remaining = await listPendingContexts(root);
+    expect(remaining).toHaveLength(0);
+    frontmatter = await readMemoryFrontmatter(memoryPath);
+    expect(frontmatter.context_ids).toEqual({ fact: "ctx_fact", procedural: "ctx_procedural" });
+  });
 });
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

@@ -1,8 +1,9 @@
-import { readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ContextDraft } from "../types.js";
 import type { NiaClient } from "../nia/client.js";
 import { ensureDir, pendingDir } from "./fs.js";
+import { withFileLock } from "./lock.js";
 
 export type PendingContext = {
   id: string;
@@ -30,7 +31,12 @@ export type DrainPendingResult = {
     pending: PendingContextFile;
     response: Awaited<ReturnType<NiaClient["saveContext"]>>;
   }>;
-  failed: Array<{ file_path: string; error: Error }>;
+  failed: Array<{ file_path: string; error: Error; pending?: PendingContextFile }>;
+};
+
+type PendingReadResult = {
+  pending: PendingContextFile[];
+  corrupt: Array<{ file_path: string; error: Error }>;
 };
 
 export async function queuePending(
@@ -51,7 +57,7 @@ export async function queuePending(
     attempts: 0,
     created_at: new Date().toISOString()
   };
-  await writeFile(path, `${JSON.stringify(body, null, 2)}\n`, "utf8");
+  await writePendingFile(path, body);
   return path;
 }
 
@@ -71,38 +77,37 @@ export async function enqueuePendingContext(
     attempts: 0,
     created_at: new Date().toISOString()
   };
-  await writeFile(path, `${JSON.stringify(body, null, 2)}\n`, "utf8");
+  await writePendingFile(path, body);
   return path;
 }
 
 export async function listPending(cwd: string): Promise<PendingContext[]> {
-  const dir = pendingDir(cwd);
-  try {
-    const entries = await readdir(dir);
-    const results: PendingContext[] = [];
-    for (const entry of entries.filter((name) => name.endsWith(".json"))) {
-      const parsed = JSON.parse(await readFile(join(dir, entry), "utf8")) as PendingContext;
-      results.push(parsed);
-    }
-    return results;
-  } catch {
-    return [];
-  }
+  return (await readPendingContextFiles(cwd)).pending.map(({ file_path: _filePath, ...pending }) => pending);
 }
 
 export async function listPendingContexts(cwd: string): Promise<PendingContextFile[]> {
+  return (await readPendingContextFiles(cwd)).pending;
+}
+
+async function readPendingContextFiles(cwd: string): Promise<PendingReadResult> {
   const dir = pendingDir(cwd);
   try {
-    const entries = await readdir(dir);
-    const results: PendingContextFile[] = [];
-    for (const entry of entries.filter((name) => name.endsWith(".json"))) {
+    const entries = (await readdir(dir)).filter((name) => name.endsWith(".json")).sort();
+    const pending: PendingContextFile[] = [];
+    const corrupt: PendingReadResult["corrupt"] = [];
+    for (const entry of entries) {
       const filePath = join(dir, entry);
-      const parsed = JSON.parse(await readFile(filePath, "utf8")) as PendingContext;
-      results.push({ ...parsed, file_path: filePath });
+      try {
+        const parsed = JSON.parse(await readFile(filePath, "utf8")) as PendingContext;
+        pending.push({ ...parsed, file_path: filePath });
+      } catch (error) {
+        corrupt.push({ file_path: filePath, error: toError(error) });
+      }
     }
-    return results;
-  } catch {
-    return [];
+    return { pending, corrupt };
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return { pending: [], corrupt: [] };
+    throw error;
   }
 }
 
@@ -121,9 +126,18 @@ export async function drainPendingContexts(
   client: NiaClient,
   options: { limit?: number } = {}
 ): Promise<DrainPendingResult> {
-  const pending = (await listPendingContexts(cwd)).slice(0, options.limit ?? Number.POSITIVE_INFINITY);
+  return withFileLock(join(pendingDir(cwd), ".drain.lock"), () => drainPendingContextsUnlocked(cwd, client, options));
+}
+
+async function drainPendingContextsUnlocked(
+  cwd: string,
+  client: NiaClient,
+  options: { limit?: number } = {}
+): Promise<DrainPendingResult> {
+  const listed = await readPendingContextFiles(cwd);
+  const pending = listed.pending.slice(0, options.limit ?? Number.POSITIVE_INFINITY);
   const saved: DrainPendingResult["saved"] = [];
-  const failed: DrainPendingResult["failed"] = [];
+  const failed: DrainPendingResult["failed"] = [...listed.corrupt];
 
   for (const item of pending) {
     try {
@@ -137,12 +151,18 @@ export async function drainPendingContexts(
         last_error: errorMessage(error)
       };
       const { file_path: _filePath, ...body } = next;
-      await writeFile(item.file_path, `${JSON.stringify(body, null, 2)}\n`, "utf8");
-      failed.push({ file_path: item.file_path, error: toError(error) });
+      await writePendingFile(item.file_path, body);
+      failed.push({ file_path: item.file_path, error: toError(error), pending: item });
     }
   }
 
   return { saved, failed };
+}
+
+async function writePendingFile(path: string, body: PendingContext): Promise<void> {
+  const tmpPath = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+  await writeFile(tmpPath, `${JSON.stringify(body, null, 2)}\n`, "utf8");
+  await rename(tmpPath, path);
 }
 
 function normalizeDraft(
@@ -163,4 +183,8 @@ function errorMessage(error: unknown): string {
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function isNodeError(err: unknown): err is NodeJS.ErrnoException {
+  return err instanceof Error && "code" in err;
 }

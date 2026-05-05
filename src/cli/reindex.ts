@@ -3,9 +3,9 @@ import { basename, join } from "node:path";
 import YAML from "yaml";
 import type { ContextDraft, MemoryType, NctxConfig, Trigger } from "../types.js";
 import { backfillMemoryContextIds } from "../capture/render.js";
-import { loadConfig } from "../config/load.js";
+import { findProjectRoot, loadConfig } from "../config/load.js";
 import { memoryDir } from "../lib/fs.js";
-import { drainPendingContexts } from "../lib/pending.js";
+import { drainPendingContexts, listPendingContexts, queuePending } from "../lib/pending.js";
 import { makeClient } from "../nia/hosted.js";
 
 const AGENT_SOURCE = "nctx-claude-code";
@@ -17,10 +17,11 @@ type MemoryMarkdown = {
 };
 
 export async function runReindex(cwd: string): Promise<void> {
-  const config = await loadConfig(cwd);
+  const projectRoot = findProjectRoot(cwd) ?? cwd;
+  const config = await loadConfig(projectRoot);
   const client = makeClient(config);
 
-  const drained = await drainPendingContexts(cwd, client);
+  const drained = await drainPendingContexts(projectRoot, client);
   for (const item of drained.saved) {
     console.log(`Pushed pending ${item.pending.id} (${item.pending.draft.memory_type}) -> ${item.response.id}`);
     if (item.pending.memory_path) {
@@ -33,16 +34,41 @@ export async function runReindex(cwd: string): Promise<void> {
     console.error(`Still pending ${basename(item.file_path)}: ${item.error.message}`);
   }
 
-  const memories = await listMemoryMarkdown(cwd);
+  const stillPending = await listPendingContexts(projectRoot);
+  const pendingKeys = new Set(stillPending.flatMap((pending) => pendingContextKeys(pending)));
+  const memories = await listMemoryMarkdown(projectRoot);
   for (const memory of memories) {
-    const drafts = buildDraftsFromMemory(memory, config);
+    const captureId = stringValue(memory.frontmatter.id) || basename(memory.path, ".md");
+    const drafts = buildDraftsFromMemory(memory, config).filter(
+      (draft) =>
+        !pendingKeys.has(memoryContextKey(memory.path, draft.memory_type)) &&
+        !pendingKeys.has(captureContextKey(captureId, draft.memory_type))
+    );
     const contextIds: Partial<Record<ContextDraft["memory_type"], string>> = {};
+    const queueErrors: Error[] = [];
     for (const draft of drafts) {
-      const saved = await client.saveContext(draft);
-      contextIds[draft.memory_type] = saved.id;
-      console.log(`Reindexed ${basename(memory.path)} (${draft.memory_type}) -> ${saved.id}`);
+      try {
+        const saved = await client.saveContext(draft);
+        contextIds[draft.memory_type] = saved.id;
+        console.log(`Reindexed ${basename(memory.path)} (${draft.memory_type}) -> ${saved.id}`);
+      } catch (error) {
+        try {
+          await queuePending(projectRoot, captureId, draft, { memoryPath: memory.path, error });
+          pendingKeys.add(memoryContextKey(memory.path, draft.memory_type));
+          pendingKeys.add(captureContextKey(captureId, draft.memory_type));
+          console.error(`Queued failed reindex ${basename(memory.path)} (${draft.memory_type}): ${errorMessage(error)}`);
+        } catch (queueError) {
+          queueErrors.push(toError(queueError));
+          console.error(
+            `Failed to queue reindex ${basename(memory.path)} (${draft.memory_type}): ${errorMessage(queueError)}`
+          );
+        }
+      }
     }
     await backfillMemoryContextIds(memory.path, contextIds);
+    if (queueErrors.length) {
+      throw new Error(`Failed to queue ${queueErrors.length} reindex failure(s): ${queueErrors.map(errorMessage).join("; ")}`);
+    }
   }
 }
 
@@ -97,9 +123,11 @@ function buildDraftsFromMemory(memory: MemoryMarkdown, config: NctxConfig): Cont
     operation: "edited",
     changes_description: "Touched during the captured Claude Code session."
   }));
+  const pushedTypes = pushedMemoryTypes(memory.frontmatter.context_ids);
 
   const drafts: ContextDraft[] = [];
-  for (const memoryType of memoryTypes(memory.frontmatter.memory_types)) {
+  for (const memoryType of memoryTypes(memory.frontmatter.memory_types, memory.frontmatter, memory.body)) {
+    if (pushedTypes.has(memoryType)) continue;
     const content = contentForMemoryType(memory.body, memoryType);
     if (!content) continue;
     drafts.push({
@@ -142,12 +170,18 @@ function splitSections(body: string): Array<{ heading: string; raw: string }> {
   });
 }
 
-function memoryTypes(value: unknown): Array<Exclude<MemoryType, "scratchpad">> {
-  const input = Array.isArray(value) ? value : [];
-  return input.filter(
-    (item): item is Exclude<MemoryType, "scratchpad"> =>
-      item === "fact" || item === "procedural" || item === "episodic"
-  );
+function memoryTypes(value: unknown, frontmatter: Record<string, unknown>, body: string): Array<Exclude<MemoryType, "scratchpad">> {
+  const explicit = Array.isArray(value) ? value.filter(isReindexableMemoryType) : [];
+  if (explicit.length) return explicit;
+  if (isReindexableMemoryType(frontmatter.memory_type)) return [frontmatter.memory_type];
+
+  const inferred = new Set<Exclude<MemoryType, "scratchpad">>();
+  for (const section of splitSections(body)) {
+    if (/^## (Decision|Gotcha):/.test(section.heading)) inferred.add("fact");
+    if (/^## Pattern:/.test(section.heading)) inferred.add("procedural");
+    if (/^## State\b/.test(section.heading)) inferred.add("episodic");
+  }
+  return [...inferred];
 }
 
 function triggerValue(value: unknown): Trigger {
@@ -188,4 +222,45 @@ function suffixFor(memoryType: ContextDraft["memory_type"]): string {
 function titleFor(summary: string, suffix: string): string {
   const title = `${summary.trim() || "NCtx session memory"} - ${suffix}`;
   return title.length > 200 ? `${title.slice(0, 197).trimEnd()}...` : title;
+}
+
+function pushedMemoryTypes(value: unknown): Set<Exclude<MemoryType, "scratchpad">> {
+  if (!isRecord(value)) return new Set();
+  return new Set(
+    Object.entries(value)
+      .filter(([, id]) => (typeof id === "string" ? id.trim().length > 0 : Boolean(id)))
+      .map(([memoryType]) => memoryType)
+      .filter(isReindexableMemoryType)
+  );
+}
+
+function pendingContextKeys(pending: { id: string; memory_path?: string; draft: ContextDraft }): string[] {
+  return [
+    pending.memory_path ? memoryContextKey(pending.memory_path, pending.draft.memory_type) : "",
+    captureContextKey(pending.id, pending.draft.memory_type)
+  ].filter(Boolean);
+}
+
+function memoryContextKey(memoryPath: string, memoryType: ContextDraft["memory_type"]): string {
+  return `memory:${memoryPath}:${memoryType}`;
+}
+
+function captureContextKey(captureId: string, memoryType: ContextDraft["memory_type"]): string {
+  return `capture:${captureId}:${memoryType}`;
+}
+
+function isReindexableMemoryType(value: unknown): value is Exclude<MemoryType, "scratchpad"> {
+  return value === "fact" || value === "procedural" || value === "episodic";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
