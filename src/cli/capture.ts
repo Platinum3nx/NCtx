@@ -1,6 +1,6 @@
 import { join } from "node:path";
-import type { ContextDraft, HookInput, Trigger } from "../types.js";
-import { loadConfig } from "../config/load.js";
+import type { ContextDraft, HookInput, NctxConfig, Trigger } from "../types.js";
+import { findProjectRoot, loadConfig } from "../config/load.js";
 import { readClaudeMd } from "../capture/claude-md.js";
 import { buildContextDrafts } from "../capture/contexts.js";
 import { extractMemory } from "../capture/extract.js";
@@ -20,14 +20,18 @@ import { makeClient } from "../nia/hosted.js";
 
 const DEFAULT_STDIN_TIMEOUT_MS = 10_000;
 
-export async function runCapture(trigger: Trigger): Promise<void> {
+export async function runCapture(trigger: Trigger, inputStream: NodeJS.ReadableStream = process.stdin): Promise<void> {
   if (process.env.NCTX_INTERNAL === "1") return;
 
   let cwd = process.cwd();
 
   try {
-    const input = parseHookInput(await readStdin(), trigger);
-    cwd = input.cwd || cwd;
+    const input = parseHookInput(await readStdin(inputStream), trigger);
+    const hookCwd = input.cwd || cwd;
+    const projectRoot = findProjectRoot(hookCwd);
+    if (!projectRoot) return;
+    cwd = projectRoot;
+    const config = await loadConfig(projectRoot);
     await withFileLock(sessionCaptureLockPath(cwd, input.session_id), async () => {
       const sinceLine = await readSessionCursor(cwd, input.session_id);
       const parsed = await transcriptToText(input.transcript_path, sinceLine);
@@ -38,7 +42,6 @@ export async function runCapture(trigger: Trigger): Promise<void> {
 
       const claudeMd = await readClaudeMd(cwd);
       const extraction = await extractMemory(parsed.text, claudeMd);
-      const config = await loadConfig(cwd);
       const captureId = defaultCaptureId(input.session_id);
       const drafts = buildContextDrafts(extraction, {
         captureId,
@@ -62,7 +65,7 @@ export async function runCapture(trigger: Trigger): Promise<void> {
         contextIds
       });
       await writeSessionCursor(cwd, input.session_id, parsed.nextLine);
-      await pushDrafts(cwd, drafts, captureId, memoryPath, contextIds);
+      await pushDrafts(cwd, config, drafts, captureId, memoryPath, contextIds);
       await backfillMemoryContextIds(memoryPath, contextIds);
     });
   } catch (err) {
@@ -72,13 +75,13 @@ export async function runCapture(trigger: Trigger): Promise<void> {
 
 async function pushDrafts(
   cwd: string,
+  config: NctxConfig,
   drafts: ContextDraft[],
   captureId: string,
   memoryPath: string,
   contextIds: Record<string, string>
 ): Promise<void> {
   if (!drafts.length) return;
-  const config = await loadConfig(cwd);
   const client = makeClient(config);
   await drainPendingContexts(cwd, client)
     .then(async (result) => {

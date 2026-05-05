@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { open, readFile, rm, stat } from "node:fs/promises";
+import { open, readFile, rm, stat, utimes } from "node:fs/promises";
 import { dirname } from "node:path";
 import { ensureDir } from "./fs.js";
 
@@ -40,7 +40,9 @@ export async function acquireFileLock(path: string, options: FileLockOptions = {
       const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
       await handle.writeFile(`${token}\n${new Date().toISOString()}\n`, "utf8");
       await handle.close();
+      const heartbeat = startLockHeartbeat(path, staleMs);
       return async () => {
+        if (heartbeat) clearInterval(heartbeat);
         await releaseFileLock(path, token);
       };
     } catch (err) {
@@ -53,6 +55,19 @@ export async function acquireFileLock(path: string, options: FileLockOptions = {
       await sleep(retryMs);
     }
   }
+}
+
+function startLockHeartbeat(path: string, staleMs: number): NodeJS.Timeout | null {
+  if (staleMs <= 0) return null;
+  const intervalMs = Math.max(1_000, Math.min(60_000, Math.floor(staleMs / 3)));
+  const timer = setInterval(() => {
+    const now = new Date();
+    void utimes(path, now, now).catch(() => {
+      // Best effort only; release still checks the lock token before removing.
+    });
+  }, intervalMs);
+  timer.unref?.();
+  return timer;
 }
 
 async function releaseFileLock(path: string, token: string): Promise<void> {

@@ -52,7 +52,8 @@ export async function transcriptToText(
   const turns = new RecentTextBuffer(maxTextChars);
   const toolActions: ToolAction[] = [];
   const seenToolActions = new Set<string>();
-  let nextLine = 0;
+  let lineNumber = 0;
+  let nextLine = sinceLine;
 
   const lines = createInterface({
     input: createReadStream(jsonlPath, { encoding: "utf8" }),
@@ -61,8 +62,8 @@ export async function transcriptToText(
 
   for await (const line of lines) {
     if (!line) continue;
-    const currentLine = nextLine;
-    nextLine += 1;
+    const currentLine = lineNumber;
+    lineNumber += 1;
     if (currentLine < sinceLine) continue;
 
     let event: any;
@@ -71,6 +72,7 @@ export async function transcriptToText(
     } catch {
       continue;
     }
+    nextLine = currentLine + 1;
 
     if (event.type === "user") {
       const text = extractUserText(event.message?.content, maxTextChars);

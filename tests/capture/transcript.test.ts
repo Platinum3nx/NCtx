@@ -97,6 +97,39 @@ describe("transcriptToText", () => {
     expect(parsed.text).toContain("Write (edit): src/recent.ts");
     expect(parsed.toolActions.map((action) => action.file_path)).toEqual(["src/middle.ts", "src/recent.ts"]);
   });
+
+  it("does not advance the cursor past a malformed final line", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "nctx-"));
+    const path = join(dir, "partial-session.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({ type: "user", message: { content: "stable line" } }),
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"partial"'
+      ].join("\n")
+    );
+
+    const parsed = await transcriptToText(path);
+
+    expect(parsed.text).toContain("USER: stable line");
+    expect(parsed.nextLine).toBe(1);
+
+    await writeFile(
+      path,
+      [
+        JSON.stringify({ type: "user", message: { content: "stable line" } }),
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "now complete" }] }
+        })
+      ].join("\n"),
+      "utf8"
+    );
+
+    const resumed = await transcriptToText(path, parsed.nextLine);
+    expect(resumed.text).toContain("ASSISTANT: now complete");
+    expect(resumed.nextLine).toBe(2);
+  });
 });
 
 function toolUseLine(name: string, filePath: string): string {
