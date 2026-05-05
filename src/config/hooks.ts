@@ -30,6 +30,16 @@ export type HooksStatus = {
   events: HookEventStatus[];
 };
 
+export type InspectHooksOptions = {
+  pluginRoot?: string | null;
+};
+
+type HookInspection = {
+  session: string[];
+  precompact: string[];
+  stop: string[];
+};
+
 const SESSION_COMMAND =
   `if [ "$NCTX_INTERNAL" = "1" ]; then exit 0; fi; npx -y ${PACKAGE_NAME} capture --trigger=session-end`;
 const PRECOMPACT_COMMAND =
@@ -94,28 +104,55 @@ export async function unregisterHooks(cwd: string): Promise<void> {
   await writeFile(path, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
 }
 
-export async function inspectHooks(cwd: string): Promise<{
+export async function inspectHooks(cwd: string, options: InspectHooksOptions = {}): Promise<{
   hasSessionEnd: boolean;
   hasPreCompact: boolean;
   hasRecursionGuard: boolean;
   hasObsoleteStop: boolean;
 }> {
-  const path = claudeSettingsPath(cwd);
-  if (!existsSync(path)) {
-    return { hasSessionEnd: false, hasPreCompact: false, hasRecursionGuard: false, hasObsoleteStop: false };
+  const inspections: HookInspection[] = [];
+  const projectPath = claudeSettingsPath(cwd);
+  if (existsSync(projectPath)) {
+    inspections.push(await inspectHookFile(projectPath));
   }
-  const settings = await readSettings(path);
-  const commands = (event: string) =>
-    (settings.hooks?.[event] ?? []).flatMap((group) => group.hooks ?? []).map((hook) => hook.command);
-  const session = commands("SessionEnd").filter((cmd) => cmd.includes("nctx capture"));
-  const precompact = commands("PreCompact").filter((cmd) => cmd.includes("nctx capture"));
-  const stop = commands("Stop").filter((cmd) => cmd.includes("nctx capture"));
+
+  const pluginRoot = options.pluginRoot ?? process.env.CLAUDE_PLUGIN_ROOT ?? null;
+  if (pluginRoot) {
+    const pluginPath = join(pluginRoot, "hooks", "hooks.json");
+    if (existsSync(pluginPath)) {
+      inspections.push(await inspectHookFile(pluginPath));
+    }
+  }
+
+  const session = inspections.flatMap((inspection) => inspection.session);
+  const precompact = inspections.flatMap((inspection) => inspection.precompact);
+  const stop = inspections.flatMap((inspection) => inspection.stop);
+  const captureCommands = [...session, ...precompact];
   return {
     hasSessionEnd: session.length > 0,
     hasPreCompact: precompact.length > 0,
-    hasRecursionGuard: [...session, ...precompact].every((cmd) => cmd.includes("NCTX_INTERNAL")),
+    hasRecursionGuard: captureCommands.length > 0 && captureCommands.every((cmd) => cmd.includes("NCTX_INTERNAL")),
     hasObsoleteStop: stop.length > 0
   };
+}
+
+async function inspectHookFile(path: string): Promise<HookInspection> {
+  const settings = await readSettings(path);
+  const commands = (event: string) =>
+    (settings.hooks?.[event] ?? [])
+      .flatMap((group) => group.hooks ?? [])
+      .map((hook) => hook.command)
+      .filter((command): command is string => typeof command === "string" && isNctxCaptureCommand(command));
+
+  return {
+    session: commands("SessionEnd"),
+    precompact: commands("PreCompact"),
+    stop: commands("Stop")
+  };
+}
+
+function isNctxCaptureCommand(command: string): boolean {
+  return command.includes("capture") && (command.includes("nctx") || command.includes("dist/cli/index.js"));
 }
 
 export async function getHooksStatus(cwd: string): Promise<HooksStatus> {

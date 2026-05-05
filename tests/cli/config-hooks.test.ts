@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,7 +9,7 @@ import {
   saveConfig,
   validateConfig
 } from "../../src/config/load.js";
-import { getHooksStatus, registerHooks, unregisterHooks } from "../../src/config/hooks.js";
+import { getHooksStatus, inspectHooks, registerHooks, unregisterHooks } from "../../src/config/hooks.js";
 
 const roots: string[] = [];
 
@@ -45,6 +45,21 @@ describe("config load/save", () => {
     });
   });
 
+  it("writes config owner-only even when replacing a broader existing file", async () => {
+    const root = await tempRoot();
+    const config = createHostedConfig({
+      installToken: "nctx_it_test_token_that_is_long_enough",
+      proxyUrl: "https://example.com",
+      projectRoot: root
+    });
+    await saveConfig(root, config);
+    await chmod(configPath(root), 0o644);
+
+    await saveConfig(root, config);
+
+    expect((await stat(configPath(root))).mode & 0o777).toBe(0o600);
+  });
+
   it("rejects hosted configs that leak install id or Nia keys", () => {
     const result = validateConfig({
       mode: "hosted",
@@ -63,6 +78,75 @@ describe("config load/save", () => {
 });
 
 describe("Claude hook registration", () => {
+  it("does not pass the recursion guard check when no NCtx hooks are present", async () => {
+    const root = await tempRoot();
+    const settingsPath = path.join(root, ".claude", "settings.json");
+    await mkdir(path.dirname(settingsPath), { recursive: true });
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        hooks: {
+          SessionEnd: [{ hooks: [{ type: "command", command: "echo unrelated" }] }]
+        }
+      }),
+      "utf8"
+    );
+
+    await expect(inspectHooks(root)).resolves.toMatchObject({
+      hasSessionEnd: false,
+      hasPreCompact: false,
+      hasRecursionGuard: false
+    });
+  });
+
+  it("recognizes plugin-supplied guarded hooks without project settings", async () => {
+    const root = await tempRoot();
+    const pluginRoot = path.join(root, "plugin");
+    const hooksPath = path.join(pluginRoot, "hooks", "hooks.json");
+    await mkdir(path.dirname(hooksPath), { recursive: true });
+    await writeFile(
+      hooksPath,
+      JSON.stringify({
+        hooks: {
+          SessionEnd: [
+            {
+              hooks: [
+                {
+                  type: "command",
+                  command:
+                    'if [ "$NCTX_INTERNAL" = "1" ]; then exit 0; fi; node "${CLAUDE_PLUGIN_ROOT}/dist/cli/index.js" capture --trigger=session-end',
+                  async: true,
+                  timeout: 60
+                }
+              ]
+            }
+          ],
+          PreCompact: [
+            {
+              hooks: [
+                {
+                  type: "command",
+                  command:
+                    'if [ "$NCTX_INTERNAL" = "1" ]; then exit 0; fi; node "${CLAUDE_PLUGIN_ROOT}/dist/cli/index.js" capture --trigger=precompact',
+                  async: true,
+                  timeout: 60
+                }
+              ]
+            }
+          ]
+        }
+      }),
+      "utf8"
+    );
+
+    await expect(inspectHooks(root, { pluginRoot })).resolves.toMatchObject({
+      hasSessionEnd: true,
+      hasPreCompact: true,
+      hasRecursionGuard: true,
+      hasObsoleteStop: false
+    });
+  });
+
   it("adds guarded async hooks idempotently while preserving unrelated hooks", async () => {
     const root = await tempRoot();
     const settingsPath = path.join(root, ".claude", "settings.json");

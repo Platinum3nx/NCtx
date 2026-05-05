@@ -1,17 +1,22 @@
-import { access } from "node:fs/promises";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { access, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { inspectHooks } from "../config/hooks.js";
 import { loadConfig } from "../config/load.js";
+import { getMcpStatus } from "../config/mcp-register.js";
 import { getClaudeCapabilities } from "../capture/extract.js";
 import type { NctxConfig } from "../types.js";
 
-const execFileAsync = promisify(execFile);
 const WORKER_PROBE_QUERY = "__nctx_doctor_probe__";
 const DEFAULT_WORKER_PROBE_TIMEOUT_MS = 5_000;
 const EXPECTED_AGENT_SOURCE = "nctx-claude-code";
 
 type DoctorCheck = [string, boolean, string?];
+type LifecycleStatus = {
+  hasSessionEnd: boolean;
+  hasPreCompact: boolean;
+  hasRecursionGuard: boolean;
+  hasObsoleteStop: boolean;
+};
 
 export async function runDoctor(
   cwd: string,
@@ -62,7 +67,7 @@ export async function runDoctor(
     );
   }
 
-  const hooks = await inspectHooks(cwd);
+  const hooks = mergeLifecycleStatus(await inspectHooks(cwd), await inspectPluginHooks());
   checks.push(["SessionEnd hook", hooks.hasSessionEnd]);
   checks.push(["PreCompact hook", hooks.hasPreCompact]);
   checks.push(["hook recursion guard", hooks.hasRecursionGuard]);
@@ -85,12 +90,13 @@ export async function runDoctor(
     checks.push(["cwd accessible", false]);
   }
 
-  try {
-    await execFileAsync("claude", ["mcp", "list"]);
-    checks.push(["claude mcp command", true]);
-  } catch (err) {
-    checks.push(["claude mcp command", false, err instanceof Error ? err.message : String(err)]);
-  }
+  const mcp = await getMcpStatus(cwd);
+  checks.push(["nctx MCP entry", mcp.registered, mcp.registered ? undefined : mcp.details]);
+  checks.push([
+    "nctx MCP tool registration",
+    mcp.toolRegistered,
+    mcp.toolRegistered ? undefined : mcp.details
+  ]);
 
   let failures = 0;
   for (const [name, ok, detail] of checks) {
@@ -125,7 +131,7 @@ export async function checkHostedWorker(
     const checks: DoctorCheck[] = [["Worker reachable", true]];
 
     if (!response.ok) {
-      checks.push(["hosted tag isolation", false, await responseDetail(response)]);
+      checks.push(["hosted search response", false, await responseDetail(response)]);
       return checks;
     }
 
@@ -133,22 +139,36 @@ export async function checkHostedWorker(
     try {
       body = await response.json();
     } catch {
-      checks.push(["hosted tag isolation", false, "Worker returned non-JSON search response"]);
+      checks.push(["hosted search response", false, "Worker returned non-JSON search response"]);
       return checks;
     }
 
-    const isolatedShape = hasIsolatedSearchShape(body);
+    if (!hasSearchResultsShape(body)) {
+      checks.push([
+        "hosted search response",
+        false,
+        "Worker search response did not include a results array"
+      ]);
+      return checks;
+    }
     checks.push([
-      "hosted tag isolation",
+      "hosted search response",
+      true
+    ]);
+    if (body.results.length === 0) return checks;
+
+    const isolatedShape = hasIsolatedSearchResults(body.results);
+    checks.push([
+      "hosted result isolation",
       isolatedShape,
-      isolatedShape ? undefined : "Worker search response did not have isolated result shape"
+      isolatedShape ? undefined : "Worker search results were not isolated to this hosted install"
     ]);
     return checks;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     return [
       ["Worker reachable", false, detail],
-      ["hosted tag isolation", false, "skipped because Worker probe failed"]
+      ["hosted search response", false, "skipped because Worker probe failed"]
     ];
   }
 }
@@ -197,10 +217,13 @@ async function responseDetail(response: Response): Promise<string> {
   return `HTTP ${response.status}: ${text.slice(0, 120)}`;
 }
 
-function hasIsolatedSearchShape(body: unknown): boolean {
+function hasSearchResultsShape(body: unknown): body is { results: unknown[] } {
   if (!isRecord(body) || !Array.isArray(body.results)) return false;
+  return true;
+}
 
-  return body.results.every((result) => {
+function hasIsolatedSearchResults(results: unknown[]): boolean {
+  return results.every((result) => {
     if (!isRecord(result)) return false;
     return result.agent_source === EXPECTED_AGENT_SOURCE && hasInstallTag(result.tags);
   });
@@ -212,4 +235,57 @@ function hasInstallTag(tags: unknown): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export async function inspectPluginHooks(pluginRoot = process.env.CLAUDE_PLUGIN_ROOT): Promise<LifecycleStatus> {
+  if (!pluginRoot) return emptyLifecycleStatus();
+  try {
+    const raw = await readFile(join(pluginRoot, "hooks", "hooks.json"), "utf8");
+    return inspectLifecycleObject(JSON.parse(raw));
+  } catch {
+    return emptyLifecycleStatus();
+  }
+}
+
+function mergeLifecycleStatus(a: LifecycleStatus, b: LifecycleStatus): LifecycleStatus {
+  const hasA = a.hasSessionEnd || a.hasPreCompact;
+  const hasB = b.hasSessionEnd || b.hasPreCompact;
+  const hasAnyNctxHook = hasA || hasB;
+  return {
+    hasSessionEnd: a.hasSessionEnd || b.hasSessionEnd,
+    hasPreCompact: a.hasPreCompact || b.hasPreCompact,
+    hasRecursionGuard: hasAnyNctxHook && (!hasA || a.hasRecursionGuard) && (!hasB || b.hasRecursionGuard),
+    hasObsoleteStop: a.hasObsoleteStop || b.hasObsoleteStop
+  };
+}
+
+function inspectLifecycleObject(value: unknown): LifecycleStatus {
+  if (!isRecord(value) || !isRecord(value.hooks)) return emptyLifecycleStatus();
+  const hooks = value.hooks;
+  const commands = (event: string): string[] => {
+    const groups = hooks[event];
+    if (!Array.isArray(groups)) return [];
+    return groups.flatMap((group) => {
+      if (!isRecord(group) || !Array.isArray(group.hooks)) return [];
+      return group.hooks.flatMap((hook) => (isRecord(hook) && typeof hook.command === "string" ? [hook.command] : []));
+    });
+  };
+  const session = commands("SessionEnd").filter(isNctxCaptureCommand);
+  const precompact = commands("PreCompact").filter(isNctxCaptureCommand);
+  const stop = commands("Stop").filter(isNctxCaptureCommand);
+  const active = [...session, ...precompact];
+  return {
+    hasSessionEnd: session.length > 0,
+    hasPreCompact: precompact.length > 0,
+    hasRecursionGuard: active.length > 0 && active.every((cmd) => cmd.includes("NCTX_INTERNAL")),
+    hasObsoleteStop: stop.length > 0
+  };
+}
+
+function isNctxCaptureCommand(command: string): boolean {
+  return command.includes("capture") && (command.includes("nctx") || command.includes("dist/cli/index.js"));
+}
+
+function emptyLifecycleStatus(): LifecycleStatus {
+  return { hasSessionEnd: false, hasPreCompact: false, hasRecursionGuard: false, hasObsoleteStop: false };
 }

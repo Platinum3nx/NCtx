@@ -33,6 +33,11 @@ export function findConfigPath(startDir: string): string | null {
   }
 }
 
+export function findProjectRoot(startDir: string): string | null {
+  const path = findConfigPath(startDir);
+  return path ? dirname(dirname(path)) : null;
+}
+
 export function memoriesDir(cwd: string): string {
   return memoryDir(cwd);
 }
@@ -95,7 +100,7 @@ export async function saveConfig(cwd: string, config: NctxConfig): Promise<void>
     throw new Error(`Invalid NCtx config: ${validation.errors.join("; ")}`);
   }
   await ensureNctxDirs(cwd);
-  await writeJson(configPath(cwd), config);
+  await writeJson(configPath(cwd), config, { mode: 0o600 });
 }
 
 export function validateConfig(value: unknown): ConfigValidationResult {
@@ -123,8 +128,8 @@ export function validateConfig(value: unknown): ConfigValidationResult {
   } else {
     try {
       const url = new URL(value.proxy_url);
-      if (url.protocol !== "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
-        warnings.push("proxy_url is not https");
+      if (!isAllowedProxyUrl(url)) {
+        errors.push("proxy_url must use https except for localhost development");
       }
     } catch {
       errors.push("proxy_url must be a valid URL");
@@ -142,4 +147,10 @@ export function validateConfig(value: unknown): ConfigValidationResult {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isAllowedProxyUrl(url: URL): boolean {
+  if (url.protocol === "https:") return true;
+  if (url.protocol !== "http:") return false;
+  return url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
 }
