@@ -19,3 +19,15 @@ test("readClaudeMd caps CLAUDE.md content at the requested byte budget", () => {
   assert.equal(Buffer.byteLength(content), 4096);
   assert.doesNotMatch(content, /distinctive-tail/);
 });
+
+test("readClaudeMd does not split multi-byte UTF-8 characters at the byte cap", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "nctx-claude-md-utf8-"));
+  writeFileSync(join(cwd, "CLAUDE.md"), "prefix 🧠 suffix", "utf8");
+
+  const capInsideEmoji = Buffer.byteLength("prefix ", "utf8") + 1;
+  const content = readClaudeMd(cwd, capInsideEmoji);
+
+  assert.equal(content, "prefix ");
+  assert.equal(content.includes("\uFFFD"), false);
+  assert.ok(Buffer.byteLength(content, "utf8") <= capInsideEmoji);
+});

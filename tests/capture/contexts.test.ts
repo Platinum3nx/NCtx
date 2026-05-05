@@ -47,5 +47,29 @@ describe("buildContextDrafts", () => {
       })
     ).toEqual([]);
   });
-});
 
+  it("uses memory-specific detail instead of generic filler for short content", () => {
+    const extraction: ExtractionResult = {
+      summary: "UTF-8 CLAUDE.md byte cap hardening",
+      tags: ["claude-md"],
+      files_touched: ["src/capture/claude-md.ts"],
+      decisions: [],
+      gotchas: [],
+      patterns: [],
+      state: { in_progress: "Fix cap", next_steps: [], files: [] }
+    };
+
+    const drafts = buildContextDrafts(extraction, {
+      captureId: "cap",
+      projectName: "nctx",
+      sessionId: "sid",
+      trigger: "manual",
+      nctxVersion: "0.1.0"
+    });
+
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0].content.length).toBeGreaterThanOrEqual(50);
+    expect(drafts[0].content).toContain("Session summary: UTF-8 CLAUDE.md byte cap hardening");
+    expect(drafts[0].content).not.toContain("This context was extracted");
+  });
+});

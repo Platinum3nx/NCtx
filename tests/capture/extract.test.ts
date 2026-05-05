@@ -7,9 +7,20 @@ import {
   buildClaudeArgs,
   capabilitiesFromHelp,
   extractWithClaude,
+  getClaudeCapabilities,
   parseClaudeJsonOutput,
   warningsForCapabilities
 } from "../../src/capture/extract.js";
+
+const EXTRACTION = {
+  summary: "ok",
+  tags: ["stripe"],
+  files_touched: ["src/webhook.ts"],
+  decisions: [{ title: "Use Redis", rationale: "Stripe retries reuse event ids.", files: ["src/webhook.ts"] }],
+  gotchas: [],
+  patterns: [],
+  state: { in_progress: null, next_steps: [], files: [] }
+};
 
 test("buildClaudeArgs uses feature-detected safe headless flags", () => {
   const caps = capabilitiesFromHelp("--tools\n--no-session-persistence\n--json-schema\n--model\n");
@@ -35,12 +46,54 @@ test("missing claude feature flags produce warnings and safe fallbacks", () => {
 
 test("parseClaudeJsonOutput accepts structured_output and result JSON strings", () => {
   assert.deepEqual(
-    parseClaudeJsonOutput('{"structured_output":{"summary":"ok"}}'),
-    { summary: "ok" }
+    parseClaudeJsonOutput(JSON.stringify({ structured_output: EXTRACTION })),
+    EXTRACTION
   );
   assert.deepEqual(
-    parseClaudeJsonOutput('{"result":"{\\"summary\\":\\"ok\\"}"}'),
-    { summary: "ok" }
+    parseClaudeJsonOutput(JSON.stringify({ result: JSON.stringify(EXTRACTION) })),
+    EXTRACTION
+  );
+});
+
+test("parseClaudeJsonOutput rejects Claude wrapper metadata without extraction content", () => {
+  assert.throws(
+    () =>
+      parseClaudeJsonOutput(
+        JSON.stringify({
+          type: "result",
+          subtype: "success",
+          usage: { input_tokens: 100 },
+          metadata: { summary: "not the extraction payload" }
+        })
+      ),
+    /summary must be a string/
+  );
+});
+
+test("getClaudeCapabilities reports missing Claude Code CLI clearly", () => {
+  const missingClaude = join(mkdtempSync(join(tmpdir(), "nctx-missing-claude-")), "claude");
+  assert.throws(
+    () => getClaudeCapabilities(missingClaude),
+    /Claude Code CLI is not installed or not on PATH/
+  );
+});
+
+test("getClaudeCapabilities reports claude --help failures clearly", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "nctx-help-failed-"));
+  const claudePath = join(cwd, "fake-claude");
+  writeFileSync(
+    claudePath,
+    `#!/bin/sh
+echo "help exploded" >&2
+exit 42
+`,
+    "utf8"
+  );
+  chmodSync(claudePath, 0o755);
+
+  assert.throws(
+    () => getClaudeCapabilities(claudePath),
+    /Unable to run `.*fake-claude --help` to detect Claude Code capabilities\. exited 42: help exploded/
   );
 });
 

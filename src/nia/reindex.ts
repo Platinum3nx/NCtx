@@ -10,6 +10,7 @@ const SECTION_TO_MEMORY_TYPE: Array<{ pattern: RegExp; memoryType: ReindexMemory
   { pattern: /^(patterns?|procedures?|playbooks?)/i, memoryType: "procedural" },
   { pattern: /^(state|current state|next steps?|handoff|open questions?)/i, memoryType: "episodic" }
 ];
+const MIN_NIA_CONTENT_CHARS = 50;
 
 export function buildContextDraftsFromMemory(memory: ParsedMemoryFile): ContextDraft[] {
   const explicit = explicitContextDrafts(memory);
@@ -93,7 +94,7 @@ function draft(memory: ParsedMemoryFile, memoryType: ReindexMemoryType, content:
   return {
     title: `${memoryTitle(memory)} (${memoryType})`.slice(0, 200),
     summary: safeSummary(memorySummary(memory)),
-    content: ensureMinimumContent(content),
+    content: ensureMinimumContent(content, memory, memoryType),
     tags: tagsFor(memory),
     agent_source: AGENT_SOURCE,
     memory_type: memoryType,
@@ -155,8 +156,16 @@ function safeSummary(summary: string): string {
   return "NCtx memory reindexed from a local capture file.";
 }
 
-function ensureMinimumContent(content: string): string {
+function ensureMinimumContent(content: string, memory: ParsedMemoryFile, memoryType: ReindexMemoryType): string {
   const trimmed = content.trim();
-  if (trimmed.length >= 50) return trimmed;
-  return `${trimmed}\n\nAdditional NCtx memory content preserved from the local capture file.`;
+  if (trimmed.length >= MIN_NIA_CONTENT_CHARS) return trimmed;
+  const summary = memorySummary(memory).trim();
+  const details = [
+    summary ? `Memory summary: ${summary.slice(0, 1000)}` : `Memory title: ${memoryTitle(memory)}`,
+    `Memory type: ${memoryType}`,
+    `Capture id: ${memory.id}`
+  ];
+  return [trimmed, ...details.filter((detail) => !trimmed.includes(detail))]
+    .join("\n\n")
+    .trim();
 }
