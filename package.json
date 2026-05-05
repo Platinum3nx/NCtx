@@ -1,13 +1,17 @@
 {
-  "name": "@arjunmalghan/nctx",
+  "name": "@platinum3nx/nctx",
   "version": "0.1.0",
   "description": "Persistent Claude Code session memory powered by Nia Context Sharing.",
   "type": "module",
   "bin": {
-    "nctx": "./dist/cli/index.js"
+    "nctx": "dist/cli/index.js"
   },
   "files": [
     "dist",
+    ".claude-plugin",
+    "hooks",
+    "skills",
+    ".mcp.json",
     "README.md",
     "LICENSE"
   ],
@@ -30,7 +34,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "@types/yargs": "^17.0.33",
+    "@types/yargs": "^17.0.35",
     "tsup": "^8.5.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",

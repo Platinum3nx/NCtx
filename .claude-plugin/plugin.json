@@ -1,0 +1,20 @@
+{
+  "name": "nctx",
+  "version": "0.1.0",
+  "description": "Persistent Claude Code session memory powered by Nia Context Sharing.",
+  "author": {
+    "name": "platinum3nx"
+  },
+  "homepage": "https://www.npmjs.com/package/@platinum3nx/nctx",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "memory",
+    "mcp",
+    "nia",
+    "context"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json"
+}

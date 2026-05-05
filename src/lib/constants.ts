@@ -1,4 +1,4 @@
-export const PACKAGE_NAME = "@arjunmalghan/nctx";
+export const PACKAGE_NAME = "@platinum3nx/nctx";
 export const PACKAGE_VERSION = "0.1.0";
 
 export const NCTX_DIRNAME = ".nctx";

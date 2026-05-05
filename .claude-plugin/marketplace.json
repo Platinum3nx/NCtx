@@ -1,0 +1,39 @@
+{
+  "name": "nctx-marketplace",
+  "owner": {
+    "name": "platinum3nx"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for persistent project memory."
+  },
+  "plugins": [
+    {
+      "name": "nctx",
+      "source": {
+        "source": "npm",
+        "package": "@platinum3nx/nctx",
+        "version": "0.1.0"
+      },
+      "description": "Persistent Claude Code session memory powered by Nia Context Sharing.",
+      "version": "0.1.0",
+      "author": {
+        "name": "platinum3nx"
+      },
+      "homepage": "https://www.npmjs.com/package/@platinum3nx/nctx",
+      "license": "MIT",
+      "keywords": [
+        "claude-code",
+        "memory",
+        "mcp",
+        "nia",
+        "context"
+      ],
+      "category": "productivity",
+      "tags": [
+        "memory",
+        "context",
+        "mcp"
+      ]
+    }
+  ]
+}
