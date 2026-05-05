@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+.nctx/
+.wrangler/
+worker/.wrangler/
+worker/dist/
+*.log
+

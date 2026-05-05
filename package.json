@@ -1,0 +1,39 @@
+{
+  "name": "@arjunmalghan/nctx",
+  "version": "0.1.0",
+  "description": "Persistent Claude Code session memory powered by Nia Context Sharing.",
+  "type": "module",
+  "bin": {
+    "nctx": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "worker:build": "npm --prefix worker run build",
+    "worker:deploy:dry": "npm --prefix worker run deploy:dry"
+  },
+  "engines": {
+    "node": ">=20.18.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "yaml": "^2.8.4",
+    "yargs": "^18.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/yargs": "^17.0.33",
+    "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.5"
+  }
+}
