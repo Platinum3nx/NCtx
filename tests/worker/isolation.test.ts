@@ -5,10 +5,14 @@ import {
   buildSemanticSearchRequest,
   buildTextSearchUrl,
   filterSemanticSearchResponse,
+  filterTextSearchResponse,
   isolateContextBody,
   normalizeMemoryTypeFromTags,
+  projectTagFromRequestUrl,
   sanitizeAndInjectTags
 } from "../../worker/src/isolation.js";
+
+const PUBLIC_BETA_PACKAGE_SHARED_SECRET = "nctx-public-beta-client-v1";
 
 vi.mock(
   "cloudflare:workers",
@@ -109,6 +113,18 @@ describe("Worker install isolation helpers", () => {
     expect(search?.upstreamUrl.searchParams.get("limit")).toBe("100");
   });
 
+  it("extracts project search scope without forwarding it as the isolation boundary", () => {
+    const search = buildSemanticSearchRequest(
+      "https://worker.example/contexts/semantic-search?q=stripe&limit=5&project_name=alpha"
+    );
+
+    expect(search?.projectTag).toBe("project:alpha");
+    expect(search?.upstreamUrl.searchParams.has("tags")).toBe(false);
+    expect(projectTagFromRequestUrl("https://worker.example/contexts/search?q=stripe&tags=project:beta")).toBe(
+      "project:beta"
+    );
+  });
+
   it("post-filters semantic results by install tag and forced agent source", () => {
     const filtered = filterSemanticSearchResponse(
       {
@@ -146,6 +162,48 @@ describe("Worker install isolation helpers", () => {
         tags: ["install:server"],
         agent_source: AGENT_SOURCE,
         relevance_score: 0.9
+      }
+    ]);
+    expect(filtered.search_metadata).toEqual({ total_results: 1 });
+  });
+
+  it("post-filters text search results by install tag, agent source, and project scope", () => {
+    const filtered = filterTextSearchResponse(
+      {
+        contexts: [
+          {
+            id: "owned-project",
+            tags: ["install:server", "project:alpha"],
+            agent_source: AGENT_SOURCE
+          },
+          {
+            id: "owned-other-project",
+            tags: ["install:server", "project:beta"],
+            agent_source: AGENT_SOURCE
+          },
+          {
+            id: "other-install",
+            tags: ["install:other", "project:alpha"],
+            agent_source: AGENT_SOURCE
+          },
+          {
+            id: "other-agent",
+            tags: ["install:server", "project:alpha"],
+            agent_source: "nctx-test"
+          }
+        ],
+        search_metadata: { total_results: 4 }
+      },
+      "install:server",
+      5,
+      "project:alpha"
+    );
+
+    expect(filtered.contexts).toEqual([
+      {
+        id: "owned-project",
+        tags: ["install:server", "project:alpha"],
+        agent_source: AGENT_SOURCE
       }
     ]);
     expect(filtered.search_metadata).toEqual({ total_results: 1 });
@@ -218,6 +276,217 @@ describe("Worker install isolation helpers", () => {
     expect(forwardedBody.tags).toEqual(["project:alpha", "topic", `install:${forwardedBody.metadata.install_id}`]);
   });
 
+  it("handler post-filters text search responses before returning them", async () => {
+    const { default: worker } = await import("../../worker/src/index.js");
+    const env = makeEnv();
+    const installToken = await registerInstall(worker, env);
+    const upstreamUrls: string[] = [];
+
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      upstreamUrls.push(url.toString());
+      const installTag = url.searchParams.get("tags") ?? "install:missing";
+      return Response.json({
+        contexts: [
+          {
+            id: "owned",
+            tags: [installTag, "project:alpha"],
+            agent_source: AGENT_SOURCE
+          },
+          {
+            id: "cross-project",
+            tags: [installTag, "project:beta"],
+            agent_source: AGENT_SOURCE
+          },
+          {
+            id: "other-agent",
+            tags: [installTag, "project:alpha"],
+            agent_source: "nctx-test"
+          }
+        ]
+      });
+    });
+
+    const response = await worker.fetch(
+      new Request("https://worker.example/contexts/search?q=owned&limit=3&project_name=alpha", {
+        headers: { Authorization: `Bearer ${installToken}` }
+      }),
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(new URL(upstreamUrls[0]).searchParams.get("tags")).toMatch(/^install:/);
+    await expect(response.json()).resolves.toMatchObject({
+      contexts: [
+        {
+          id: "owned",
+          agent_source: AGENT_SOURCE
+        }
+      ]
+    });
+  });
+
+  it("handler uses isolated text fallback when semantic post-filtering misses recall", async () => {
+    const { default: worker } = await import("../../worker/src/index.js");
+    const env = makeEnv();
+    const installToken = await registerInstall(worker, env);
+    const upstreamUrls: string[] = [];
+
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      upstreamUrls.push(url.toString());
+      if (url.pathname.endsWith("/contexts/semantic-search")) {
+        return Response.json({
+          results: [
+            {
+              id: "other-install",
+              tags: ["install:other", "project:alpha"],
+              agent_source: AGENT_SOURCE
+            }
+          ],
+          search_metadata: { total_results: 1 }
+        });
+      }
+
+      const installTag = url.searchParams.get("tags") ?? "install:missing";
+      return Response.json({
+        contexts: [
+          {
+            id: "fallback-owned",
+            tags: [installTag, "project:alpha"],
+            agent_source: AGENT_SOURCE
+          },
+          {
+            id: "fallback-other-project",
+            tags: [installTag, "project:beta"],
+            agent_source: AGENT_SOURCE
+          }
+        ]
+      });
+    });
+
+    const response = await worker.fetch(
+      new Request("https://worker.example/contexts/semantic-search?q=recall&limit=1&project_name=alpha", {
+        headers: { Authorization: `Bearer ${installToken}` }
+      }),
+      env
+    );
+    const body = (await response.json()) as any;
+
+    expect(response.status).toBe(200);
+    expect(upstreamUrls).toHaveLength(2);
+    expect(upstreamUrls[0]).toContain("/contexts/semantic-search");
+    expect(upstreamUrls[1]).toContain("/contexts/search");
+    expect(body.results).toEqual([
+      {
+        id: "fallback-owned",
+        tags: [new URL(upstreamUrls[1]).searchParams.get("tags"), "project:alpha"],
+        agent_source: AGENT_SOURCE
+      }
+    ]);
+    expect(body.search_metadata).toMatchObject({
+      total_results: 1,
+      text_fallback_used: true
+    });
+  });
+
+  it("bounds install minting by IP before returning public beta tokens", async () => {
+    const { default: worker } = await import("../../worker/src/index.js");
+    const env = makeEnv({ packageSecret: PUBLIC_BETA_PACKAGE_SHARED_SECRET });
+    const headers = {
+      "x-nctx-package-secret": PUBLIC_BETA_PACKAGE_SHARED_SECRET,
+      "cf-connecting-ip": "203.0.113.10"
+    };
+
+    for (let i = 0; i < 25; i += 1) {
+      const response = await worker.fetch(
+        new Request("https://worker.example/installs", {
+          method: "POST",
+          headers
+        }),
+        env
+      );
+      expect(response.status).toBe(200);
+    }
+
+    const response = await worker.fetch(
+      new Request("https://worker.example/installs", {
+        method: "POST",
+        headers
+      }),
+      env
+    );
+
+    expect(response.status).toBe(429);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "Install registration rate limited",
+      scope: "ip",
+      cap: 25
+    });
+  });
+
+  it("applies a global daily cap when the deployed Worker uses the public beta secret", async () => {
+    const { default: worker } = await import("../../worker/src/index.js");
+    const seenCounters: Array<{ id: string; cap: number }> = [];
+    const env = makeEnv({
+      packageSecret: PUBLIC_BETA_PACKAGE_SHARED_SECRET,
+      incrementAndCheck: async (id, cap) => {
+        seenCounters.push({ id, cap });
+        if (id === "install-mint:public-beta") return { allowed: false, count: cap, remaining: 0 };
+        return { allowed: true, count: 1, remaining: cap - 1 };
+      }
+    });
+
+    const response = await worker.fetch(
+      new Request("https://worker.example/installs", {
+        method: "POST",
+        headers: {
+          "x-nctx-package-secret": PUBLIC_BETA_PACKAGE_SHARED_SECRET,
+          "cf-connecting-ip": "203.0.113.20"
+        }
+      }),
+      env
+    );
+
+    expect(response.status).toBe(429);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "Install registration rate limited",
+      scope: "public-beta",
+      cap: 1000
+    });
+    expect(seenCounters).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: expect.stringMatching(/^install-mint:ip:/), cap: 25 }),
+        { id: "install-mint:public-beta", cap: 1000 }
+      ])
+    );
+  });
+
+  it("does not spend the public beta global mint cap for private package secrets", async () => {
+    const { default: worker } = await import("../../worker/src/index.js");
+    const seenCounters: string[] = [];
+    const env = makeEnv({
+      incrementAndCheck: async (id, cap) => {
+        seenCounters.push(id);
+        return { allowed: true, count: 1, remaining: cap - 1 };
+      }
+    });
+
+    const response = await worker.fetch(
+      new Request("https://worker.example/installs", {
+        method: "POST",
+        headers: {
+          "x-nctx-package-secret": "package-secret",
+          "cf-connecting-ip": "203.0.113.30"
+        }
+      }),
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(seenCounters).toEqual([expect.stringMatching(/^install-mint:ip:/)]);
+  });
+
   it("returns 400 for invalid save JSON without forwarding upstream", async () => {
     const { default: worker } = await import("../../worker/src/index.js");
     const env = makeEnv();
@@ -276,6 +545,7 @@ describe("Worker install isolation helpers", () => {
       }
     });
     const installToken = await registerInstall(worker, env);
+    capCalls = 0;
 
     const response = await worker.fetch(
       new Request("https://worker.example/unrouted", {
@@ -295,7 +565,7 @@ async function registerInstall(worker: any, env: any): Promise<string> {
   const initResponse = await worker.fetch(
     new Request("https://worker.example/installs", {
       method: "POST",
-      headers: { "x-nctx-package-secret": "package-secret" }
+      headers: { "x-nctx-package-secret": env.PACKAGE_SHARED_SECRET }
     }),
     env
   );
@@ -305,13 +575,18 @@ async function registerInstall(worker: any, env: any): Promise<string> {
 
 function makeEnv(
   options: {
-    incrementAndCheck?: () => Promise<{ allowed: boolean; count: number; remaining: number }>;
+    packageSecret?: string;
+    incrementAndCheck?: (
+      id: string,
+      cap: number
+    ) => Promise<{ allowed: boolean; count: number; remaining: number }>;
   } = {}
 ): any {
   const installs = new Map<string, string>();
+  const counters = new Map<string, number>();
   return {
     NIA_API_KEY: "nia-key",
-    PACKAGE_SHARED_SECRET: "package-secret",
+    PACKAGE_SHARED_SECRET: options.packageSecret ?? "package-secret",
     INSTALLS: {
       get: async (key: string) => installs.get(key) ?? null,
       put: async (key: string, value: string) => {
@@ -320,9 +595,16 @@ function makeEnv(
     },
     INSTALL_COUNTER: {
       idFromName: (name: string) => name,
-      get: () => ({
-        incrementAndCheck:
-          options.incrementAndCheck ?? (async () => ({ allowed: true, count: 1, remaining: 499 }))
+      get: (id: string) => ({
+        incrementAndCheck: async (cap: number) => {
+          if (options.incrementAndCheck) return options.incrementAndCheck(id, cap);
+
+            const count = counters.get(id) ?? 0;
+            if (count >= cap) return { allowed: false, count, remaining: 0 };
+            const next = count + 1;
+            counters.set(id, next);
+            return { allowed: true, count: next, remaining: Math.max(0, cap - next) };
+        }
       })
     },
     IP_RATE_LIMITER: {

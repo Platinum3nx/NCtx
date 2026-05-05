@@ -21,6 +21,7 @@ export interface IsolatedContextBody extends Record<string, unknown> {
 export interface SemanticSearchRequest {
   requestedLimit: number;
   upstreamUrl: URL;
+  projectTag: string | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -105,6 +106,12 @@ export function isOwnedByInstall(result: unknown, installTag: string): boolean {
   );
 }
 
+export function isInProjectScope(result: unknown, projectTag: string | null): boolean {
+  if (!projectTag) return true;
+  if (!isRecord(result) || !Array.isArray(result.tags)) return false;
+  return result.tags.includes(projectTag);
+}
+
 function parseRequestedLimit(rawLimit: string | null): number {
   if (!rawLimit) return DEFAULT_SEMANTIC_LIMIT;
 
@@ -122,6 +129,7 @@ export function buildSemanticSearchRequest(requestUrl: string, base = NIA_BASE):
   const requestedLimit = parseRequestedLimit(url.searchParams.get("limit"));
   const upstreamLimit = Math.min(MAX_SEMANTIC_LIMIT, requestedLimit * SEMANTIC_OVERFETCH_FACTOR);
   const upstreamUrl = new URL(`${base}/contexts/semantic-search`);
+  const projectTag = projectTagFromSearchParams(url.searchParams);
 
   upstreamUrl.searchParams.set("q", query);
   upstreamUrl.searchParams.set("limit", String(upstreamLimit));
@@ -130,22 +138,55 @@ export function buildSemanticSearchRequest(requestUrl: string, base = NIA_BASE):
     url.searchParams.get("include_highlights") ?? "true"
   );
 
-  return { requestedLimit, upstreamUrl };
+  return { requestedLimit, upstreamUrl, projectTag };
 }
 
 export function filterSemanticSearchResponse(
   rawBody: unknown,
   installTag: string,
-  requestedLimit: number
+  requestedLimit: number,
+  projectTag: string | null = null
 ): Record<string, unknown> {
   const body = isRecord(rawBody) ? { ...rawBody } : {};
   const rawResults = Array.isArray(body.results) ? body.results : [];
   const results = rawResults
-    .filter((result) => isOwnedByInstall(result, installTag))
+    .filter((result) => isOwnedByInstall(result, installTag) && isInProjectScope(result, projectTag))
     .map((result) => normalizeMemoryTypeFromTags(result))
     .slice(0, requestedLimit);
 
   body.results = results;
+
+  if (isRecord(body.search_metadata)) {
+    body.search_metadata = {
+      ...body.search_metadata,
+      total_results: results.length
+    };
+  }
+
+  return body;
+}
+
+export function filterTextSearchResponse(
+  rawBody: unknown,
+  installTag: string,
+  requestedLimit: number,
+  projectTag: string | null = null
+): Record<string, unknown> {
+  const body = isRecord(rawBody) ? { ...rawBody } : {};
+  const resultsKey = Array.isArray(body.results) ? "results" : Array.isArray(body.contexts) ? "contexts" : "results";
+  const rawResults = Array.isArray(body[resultsKey]) ? body[resultsKey] : [];
+  const results = rawResults
+    .filter((result) => isOwnedByInstall(result, installTag) && isInProjectScope(result, projectTag))
+    .map((result) => normalizeMemoryTypeFromTags(result))
+    .slice(0, requestedLimit);
+
+  body[resultsKey] = results;
+  if (resultsKey !== "results" && Array.isArray(body.results)) {
+    body.results = filterSearchResults(body.results, installTag, requestedLimit, projectTag);
+  }
+  if (resultsKey !== "contexts" && Array.isArray(body.contexts)) {
+    body.contexts = filterSearchResults(body.contexts, installTag, requestedLimit, projectTag);
+  }
 
   if (isRecord(body.search_metadata)) {
     body.search_metadata = {
@@ -184,6 +225,65 @@ export function buildTextSearchUrl(requestUrl: string, installTag: string, base 
 
   upstreamUrl.searchParams.set("tags", installTag);
   return upstreamUrl;
+}
+
+export function requestedTextLimit(requestUrl: string): number {
+  const url = new URL(requestUrl);
+  return parseRequestedLimit(url.searchParams.get("limit"));
+}
+
+export function projectTagFromRequestUrl(requestUrl: string): string | null {
+  return projectTagFromSearchParams(new URL(requestUrl).searchParams);
+}
+
+function filterSearchResults(
+  rawResults: unknown[],
+  installTag: string,
+  requestedLimit: number,
+  projectTag: string | null
+): unknown[] {
+  return rawResults
+    .filter((result) => isOwnedByInstall(result, installTag) && isInProjectScope(result, projectTag))
+    .map((result) => normalizeMemoryTypeFromTags(result))
+    .slice(0, requestedLimit);
+}
+
+function projectTagFromSearchParams(searchParams: URLSearchParams): string | null {
+  const projectName = firstNonBlank(searchParams.get("project_name"), searchParams.get("project"));
+  const tagFromProjectName = projectName ? normalizeProjectTag(projectName) : null;
+  if (tagFromProjectName) return tagFromProjectName;
+
+  for (const rawTags of searchParams.getAll("tags")) {
+    for (const rawTag of rawTags.split(",")) {
+      const tag = sanitizeSearchScopeTag(rawTag);
+      if (tag?.toLowerCase().startsWith("project:")) return tag;
+    }
+  }
+
+  return null;
+}
+
+function firstNonBlank(...values: Array<string | null>): string | null {
+  for (const value of values) {
+    if (value?.trim()) return value;
+  }
+  return null;
+}
+
+function normalizeProjectTag(projectNameOrTag: string): string | null {
+  const trimmed = sanitizeSearchScopeTag(projectNameOrTag);
+  if (!trimmed) return null;
+  const rawProject = trimmed.toLowerCase().startsWith("project:") ? trimmed.slice("project:".length) : trimmed;
+  const normalized = rawProject.toLowerCase().replace(/\s+/g, "-");
+  return normalized ? `project:${normalized}` : null;
+}
+
+function sanitizeSearchScopeTag(tag: string): string | null {
+  const trimmed = tag.trim();
+  if (!trimmed || trimmed.length > 200) return null;
+  if (/[\u0000-\u001f\u007f]/.test(trimmed)) return null;
+  if (isInstallTag(trimmed)) return null;
+  return trimmed;
 }
 
 function copyBoundedIntegerParam(

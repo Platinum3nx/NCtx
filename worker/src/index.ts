@@ -6,9 +6,12 @@ import {
   buildSemanticSearchRequest,
   buildTextSearchUrl,
   filterSemanticSearchResponse,
+  filterTextSearchResponse,
   isolateContextBody,
   json,
   mintToken,
+  projectTagFromRequestUrl,
+  requestedTextLimit,
   sha256Hex
 } from "./isolation";
 
@@ -21,7 +24,10 @@ export interface Env {
 }
 
 const PER_INSTALL_DAILY_CAP = 500;
+const INSTALL_MINT_IP_DAILY_CAP = 25;
+const PUBLIC_INSTALL_MINT_DAILY_CAP = 1_000;
 const NIA_UPSTREAM_TIMEOUT_MS = 15_000;
+const PUBLIC_BETA_PACKAGE_SHARED_SECRET = "nctx-public-beta-client-v1";
 export const MAX_SAVE_BODY_BYTES = 256 * 1024;
 
 type AuthedRoute = "save" | "semantic-search" | "text-search";
@@ -51,10 +57,44 @@ export class InstallCounter extends DurableObject<Env> {
 }
 
 async function checkDailyCap(env: Env, tokenHash: string): Promise<Response | null> {
-  const id = env.INSTALL_COUNTER.idFromName(tokenHash);
-  const stub = env.INSTALL_COUNTER.get(id);
-  const result = await stub.incrementAndCheck(PER_INSTALL_DAILY_CAP);
+  const result = await incrementDailyCounter(env, tokenHash, PER_INSTALL_DAILY_CAP);
   return result.allowed ? null : json({ error: "Rate limited", cap: PER_INSTALL_DAILY_CAP }, 429);
+}
+
+async function incrementDailyCounter(
+  env: Env,
+  counterName: string,
+  cap: number
+): Promise<{ allowed: boolean; count: number; remaining: number }> {
+  const id = env.INSTALL_COUNTER.idFromName(counterName);
+  const stub = env.INSTALL_COUNTER.get(id);
+  return stub.incrementAndCheck(cap);
+}
+
+async function checkInstallMintThrottle(request: Request, env: Env): Promise<Response | null> {
+  const ip = request.headers.get("cf-connecting-ip") || "unknown";
+  const ipHash = await sha256Hex(ip);
+  const ipCounter = await incrementDailyCounter(env, `install-mint:ip:${ipHash}`, INSTALL_MINT_IP_DAILY_CAP);
+  if (!ipCounter.allowed) {
+    return json(
+      { error: "Install registration rate limited", scope: "ip", cap: INSTALL_MINT_IP_DAILY_CAP },
+      429
+    );
+  }
+
+  if (env.PACKAGE_SHARED_SECRET !== PUBLIC_BETA_PACKAGE_SHARED_SECRET) return null;
+
+  const globalCounter = await incrementDailyCounter(
+    env,
+    "install-mint:public-beta",
+    PUBLIC_INSTALL_MINT_DAILY_CAP
+  );
+  return globalCounter.allowed
+    ? null
+    : json(
+        { error: "Install registration rate limited", scope: "public-beta", cap: PUBLIC_INSTALL_MINT_DAILY_CAP },
+        429
+      );
 }
 
 async function checkIpRateLimit(request: Request, env: Env): Promise<Response | null> {
@@ -68,6 +108,9 @@ async function registerInstall(request: Request, env: Env): Promise<Response> {
   if (request.headers.get("x-nctx-package-secret") !== env.PACKAGE_SHARED_SECRET) {
     return json({ error: "Unauthorized" }, 401);
   }
+  const throttled = await checkInstallMintThrottle(request, env);
+  if (throttled) return throttled;
+
   const token = mintToken();
   const tokenHash = await sha256Hex(token);
   const installId = crypto.randomUUID();
@@ -150,7 +193,24 @@ async function forwardSemanticSearch(request: Request, env: Env, installTag: str
     return json({ error: "Upstream returned non-JSON response" }, 502);
   }
 
-  return json(filterSemanticSearchResponse(body, installTag, search.requestedLimit), upstream.status);
+  const filtered = filterSemanticSearchResponse(body, installTag, search.requestedLimit, search.projectTag);
+  if (searchResults(filtered).length >= search.requestedLimit) {
+    return json(filtered, upstream.status);
+  }
+
+  const fallbackResults = await safeTextFallback(request, env, installTag, search.requestedLimit, search.projectTag);
+  if (fallbackResults.length) {
+    filtered.results = mergeSearchResults(searchResults(filtered), fallbackResults, search.requestedLimit);
+    if (isRecord(filtered.search_metadata)) {
+      filtered.search_metadata = {
+        ...filtered.search_metadata,
+        total_results: searchResults(filtered).length,
+        text_fallback_used: true
+      };
+    }
+  }
+
+  return json(filtered, upstream.status);
 }
 
 async function forwardTextSearch(request: Request, env: Env, installTag: string): Promise<Response> {
@@ -163,10 +223,68 @@ async function forwardTextSearch(request: Request, env: Env, installTag: string)
     return json({ error: "Upstream error", status: upstream.status }, upstream.status >= 500 ? 502 : upstream.status);
   }
 
-  return new Response(upstream.body, {
-    status: upstream.status,
-    headers: { "Content-Type": upstream.headers.get("Content-Type") || "application/json" }
+  let body: unknown;
+  try {
+    body = await upstream.json();
+  } catch {
+    return json({ error: "Upstream returned non-JSON response" }, 502);
+  }
+
+  return json(
+    filterTextSearchResponse(
+      body,
+      installTag,
+      requestedTextLimit(request.url),
+      projectTagFromRequestUrl(request.url)
+    ),
+    upstream.status
+  );
+}
+
+async function safeTextFallback(
+  request: Request,
+  env: Env,
+  installTag: string,
+  requestedLimit: number,
+  projectTag: string | null
+): Promise<unknown[]> {
+  const upstream = await fetchNia(buildTextSearchUrl(request.url, installTag), {
+    headers: { Authorization: `Bearer ${env.NIA_API_KEY}` }
   });
+  if (!upstream.ok) return [];
+
+  let body: unknown;
+  try {
+    body = await upstream.json();
+  } catch {
+    return [];
+  }
+
+  const filtered = filterTextSearchResponse(body, installTag, requestedLimit, projectTag);
+  return searchResults(filtered);
+}
+
+function searchResults(body: Record<string, unknown>): unknown[] {
+  if (Array.isArray(body.results)) return body.results;
+  if (Array.isArray(body.contexts)) return body.contexts;
+  return [];
+}
+
+function mergeSearchResults(primary: unknown[], fallback: unknown[], limit: number): unknown[] {
+  const seen = new Set(primary.map(resultId).filter((id): id is string => Boolean(id)));
+  const merged = [...primary];
+  for (const result of fallback) {
+    const id = resultId(result);
+    if (id && seen.has(id)) continue;
+    if (id) seen.add(id);
+    merged.push(result);
+    if (merged.length >= limit) break;
+  }
+  return merged;
+}
+
+function resultId(result: unknown): string | null {
+  return isRecord(result) && typeof result.id === "string" && result.id ? result.id : null;
 }
 
 function authedRoute(method: string, pathname: string): AuthedRoute | null {
@@ -197,6 +315,10 @@ async function fetchNia(input: RequestInfo | URL, init: RequestInit): Promise<Re
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export default {
