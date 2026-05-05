@@ -1,6 +1,6 @@
 {
   "name": "nctx",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Persistent Claude Code session memory powered by Nia Context Sharing.",
   "author": {
     "name": "platinum3nx"
@@ -15,6 +15,5 @@
     "context"
   ],
   "skills": "./skills/",
-  "hooks": "./hooks/hooks.json",
   "mcpServers": "./.mcp.json"
 }

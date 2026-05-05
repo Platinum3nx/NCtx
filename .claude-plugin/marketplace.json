@@ -12,10 +12,10 @@
       "source": {
         "source": "npm",
         "package": "@platinum3nx/nctx",
-        "version": "0.1.0"
+        "version": "0.1.1"
       },
       "description": "Persistent Claude Code session memory powered by Nia Context Sharing.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": {
         "name": "platinum3nx"
       },
