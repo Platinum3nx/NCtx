@@ -1,0 +1,23 @@
+name = "nctx"
+main = "src/index.ts"
+compatibility_date = "2026-05-04"
+
+[[kv_namespaces]]
+binding = "INSTALLS"
+id = "588ae1ad25ea422d8bce995b3c981423"
+
+[[durable_objects.bindings]]
+name = "INSTALL_COUNTER"
+class_name = "InstallCounter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["InstallCounter"]
+
+[[ratelimits]]
+name = "IP_RATE_LIMITER"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 120
+  period = 60

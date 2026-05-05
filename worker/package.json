@@ -1,0 +1,20 @@
+{
+  "name": "nctx-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "deploy": "wrangler deploy",
+    "deploy:dry": "wrangler deploy --dry-run",
+    "dry-run": "wrangler deploy --dry-run",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260504.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.5",
+    "wrangler": "^4.87.0"
+  }
+}
