@@ -66,10 +66,10 @@ describe("MCP server tool handler", () => {
     expect(loadedConfigs).toHaveLength(1);
     expect(loadedConfigs[0].config_path).toBe(configPath);
     expect(requests[0].url).toBe(
-      "https://worker.example/contexts/semantic-search?q=server+wiring&limit=3&include_highlights=true"
+      "https://worker.example/contexts/semantic-search?q=server+wiring&limit=3&project_name=demo&include_highlights=true"
     );
     expect(textOf(result)).toContain("Remembered decision");
-    expect(textOf(result)).toContain("- Use the MCP-specific client.");
+    expect(textOf(result)).toContain("1. Use the MCP-specific client.");
     expect(result.isError).toBeUndefined();
   });
 

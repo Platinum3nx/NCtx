@@ -27,13 +27,7 @@ export function loadConfig(projectDir = process.cwd()): NctxMcpConfig {
   }
 
   const installToken = readRequiredString(parsed, "install_token", configPath);
-  const proxyUrl = readRequiredString(parsed, "proxy_url", configPath);
-
-  try {
-    new URL(proxyUrl);
-  } catch {
-    throw new Error(`Invalid proxy_url in ${configPath}: ${proxyUrl}`);
-  }
+  const proxyUrl = validateProxyUrl(readRequiredString(parsed, "proxy_url", configPath), configPath);
 
   return {
     mode: "hosted",
@@ -63,14 +57,34 @@ function readRequiredString(config: JsonObject, key: string, configPath: string)
   if (typeof value !== "string" || value.trim() === "") {
     throw new Error(`Missing required ${key} in ${configPath}`);
   }
-  return value;
+  return value.trim();
 }
 
 function readOptionalString(config: JsonObject, key: string): string | undefined {
   const value = config[key];
-  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
 }
 
 function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function validateProxyUrl(proxyUrl: string, configPath: string): string {
+  let url: URL;
+  try {
+    url = new URL(proxyUrl);
+  } catch {
+    throw new Error(`Invalid proxy_url in ${configPath}: ${proxyUrl}`);
+  }
+
+  if (url.protocol === "https:") return proxyUrl;
+  if (url.protocol === "http:" && isAllowedPlaintextDevHost(url.hostname)) return proxyUrl;
+
+  throw new Error(
+    `Invalid proxy_url in ${configPath}: remote plaintext HTTP is not allowed (${proxyUrl}). Use https, localhost, or 127.0.0.1.`
+  );
+}
+
+function isAllowedPlaintextDevHost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
 }

@@ -52,4 +52,36 @@ describe("MCP config loading", () => {
       "NCtx config not found. Run `nctx init` from this project before using nctx_memory."
     );
   });
+
+  it("rejects remote plaintext HTTP proxy URLs", async () => {
+    const root = await tempRoot();
+    await writeConfig(root, {
+      mode: "hosted",
+      install_token: "nctx_it_test_token",
+      proxy_url: "http://worker.example",
+      project_name: "demo"
+    });
+
+    expect(() => loadConfig(root)).toThrow("remote plaintext HTTP is not allowed");
+  });
+
+  it("allows plaintext localhost development proxy URLs", async () => {
+    const root = await tempRoot();
+    await writeConfig(root, {
+      mode: "hosted",
+      install_token: "nctx_it_test_token",
+      proxy_url: "http://127.0.0.1:8787/nctx",
+      project_name: "demo"
+    });
+
+    expect(loadConfig(root)).toMatchObject({
+      proxy_url: "http://127.0.0.1:8787/nctx"
+    });
+  });
 });
+
+async function writeConfig(root: string, config: Record<string, unknown>): Promise<void> {
+  const configPath = path.join(root, ".nctx", "config.json");
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await writeFile(configPath, JSON.stringify(config), "utf8");
+}

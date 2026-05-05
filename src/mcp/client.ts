@@ -47,14 +47,26 @@ class HostedNctxMemoryClient implements NctxMemoryClient {
 
   private searchUrl(query: string, limit: number, mode: MemorySearchMode): URL {
     const path = mode === "semantic" ? "/contexts/semantic-search" : "/contexts/search";
-    const url = new URL(path, this.config.proxy_url);
+    const url = proxyEndpointUrl(this.config.proxy_url, path);
     url.searchParams.set("q", query);
     url.searchParams.set("limit", String(limit));
+    if (this.config.project_name?.trim()) {
+      url.searchParams.set("project_name", this.config.project_name.trim());
+    }
     if (mode === "semantic") {
       url.searchParams.set("include_highlights", "true");
     }
     return url;
   }
+}
+
+function proxyEndpointUrl(proxyUrl: string, endpointPath: string): URL {
+  const url = new URL(proxyUrl);
+  const basePath = url.pathname === "/" ? "" : url.pathname.replace(/\/+$/, "");
+  url.pathname = `${basePath}${endpointPath}`;
+  url.search = "";
+  url.hash = "";
+  return url;
 }
 
 function normalizeLimit(limit: number): number {

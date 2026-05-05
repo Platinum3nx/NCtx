@@ -34,7 +34,7 @@ describe("MCP hosted memory client", () => {
     const results = await client.searchContexts("stripe webhook", 3, "semantic");
 
     expect(requests[0].url).toBe(
-      "https://worker.example/contexts/semantic-search?q=stripe+webhook&limit=3&include_highlights=true"
+      "https://worker.example/contexts/semantic-search?q=stripe+webhook&limit=3&project_name=test-project&include_highlights=true"
     );
     expect(requests[0].headers.get("Authorization")).toBe("Bearer nctx_it_test");
     expect(results[0]).toMatchObject({
@@ -64,7 +64,9 @@ describe("MCP hosted memory client", () => {
 
     const results = await client.searchContexts("where left off", 2, "text");
 
-    expect(requests[0].url).toBe("https://worker.example/contexts/search?q=where+left+off&limit=2");
+    expect(requests[0].url).toBe(
+      "https://worker.example/contexts/search?q=where+left+off&limit=2&project_name=test-project"
+    );
     expect(results[0]).toMatchObject({
       title: "Text memory",
       score: 0.5,
@@ -79,6 +81,26 @@ describe("MCP hosted memory client", () => {
 
     await expect(client.searchContexts("anything")).rejects.toThrow(
       "NCtx memory search failed (401 Unauthorized): Invalid install token"
+    );
+  });
+
+  it("preserves proxy path prefixes when building Worker URLs", async () => {
+    const requests: Request[] = [];
+    const client = makeClient(
+      {
+        ...config,
+        proxy_url: "https://gateway.example/nctx/proxy/"
+      },
+      async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ results: [] });
+      }
+    );
+
+    await client.searchContexts("proxy prefix", 1, "semantic");
+
+    expect(requests[0].url).toBe(
+      "https://gateway.example/nctx/proxy/contexts/semantic-search?q=proxy+prefix&limit=1&project_name=test-project&include_highlights=true"
     );
   });
 });
