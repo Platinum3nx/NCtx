@@ -1,5 +1,15 @@
 import type { ContextDraft, ExtractionResult, HookInput, MemoryType, ToolAction, Trigger } from "../types.js";
 
+export type SkippedDraft = {
+  memoryType: ContextDraft["memory_type"];
+  reason: string;
+};
+
+export type BuildContextDraftsResult = {
+  drafts: ContextDraft[];
+  skippedDrafts: SkippedDraft[];
+};
+
 type BuildOptions = {
   captureId: string;
   projectName: string;
@@ -19,12 +29,12 @@ type BuildContextDraftsInput = Omit<BuildOptions, "nctxVersion"> & {
 const AGENT_SOURCE = "nctx-claude-code";
 const MIN_NIA_CONTENT_CHARS = 50;
 
-export function buildContextDrafts(extraction: ExtractionResult, options: BuildOptions): ContextDraft[];
-export function buildContextDrafts(input: BuildContextDraftsInput): ContextDraft[];
+export function buildContextDrafts(extraction: ExtractionResult, options: BuildOptions): BuildContextDraftsResult;
+export function buildContextDrafts(input: BuildContextDraftsInput): BuildContextDraftsResult;
 export function buildContextDrafts(
   extractionOrInput: ExtractionResult | BuildContextDraftsInput,
   maybeOptions?: BuildOptions
-): ContextDraft[] {
+): BuildContextDraftsResult {
   const hasInlineExtraction = "extraction" in extractionOrInput;
   const extraction = hasInlineExtraction ? extractionOrInput.extraction : extractionOrInput;
   const options = (hasInlineExtraction ? extractionOrInput : maybeOptions) as BuildContextDraftsInput & BuildOptions;
@@ -89,11 +99,107 @@ export function buildContextDrafts(
     });
   }
 
-  return drafts;
+  // Apply quality gates: filter out low-signal drafts
+  const skippedDrafts: SkippedDraft[] = [];
+  const highSignalDrafts = drafts.filter((draft) => {
+    const result = isHighSignalDraft(draft, extraction);
+    if (!result.pass) {
+      skippedDrafts.push({ memoryType: draft.memory_type, reason: result.reason });
+    }
+    return result.pass;
+  });
+
+  return { drafts: highSignalDrafts, skippedDrafts };
 }
 
 export function memoryTypeFromDraft(draft: ContextDraft): Exclude<MemoryType, "scratchpad"> {
   return draft.memory_type;
+}
+
+// --- Quality gate logic ---
+
+type QualityGateResult = { pass: true } | { pass: false; reason: string };
+
+const GENERIC_FACT_TITLES = new Set(["code changes", "updates", "changes", "stuff", "things", "misc", "work"]);
+const GENERIC_EPISODIC_PHRASES = new Set(["working on code", "writing code", "coding", "doing work", "making changes"]);
+
+/**
+ * Determines whether a draft carries enough signal to be worth persisting.
+ * Conservative: when in doubt, keep the draft.
+ */
+export function isHighSignalDraft(draft: ContextDraft, extraction: ExtractionResult): QualityGateResult {
+  // Rule: reject drafts whose content is only padding (no original content exceeded 50 chars)
+  if (isOnlyPadding(draft.content, extraction)) {
+    return { pass: false, reason: "Content is only padding with no substantial original content" };
+  }
+
+  switch (draft.memory_type) {
+    case "fact":
+      return checkFactSignal(extraction);
+    case "procedural":
+      return checkProceduralSignal(extraction);
+    case "episodic":
+      return checkEpisodicSignal(extraction);
+    default:
+      return { pass: true };
+  }
+}
+
+function checkFactSignal(extraction: ExtractionResult): QualityGateResult {
+  // Require at least one decision or gotcha with a non-generic title
+  const hasSpecificDecision = extraction.decisions.some(
+    (d) => d.title.trim().length > 5 && !GENERIC_FACT_TITLES.has(d.title.trim().toLowerCase())
+  );
+  const hasSpecificGotcha = extraction.gotchas.some(
+    (g) => g.problem.trim().length > 5 && !GENERIC_FACT_TITLES.has(g.problem.trim().toLowerCase())
+  );
+
+  if (!hasSpecificDecision && !hasSpecificGotcha) {
+    return { pass: false, reason: "No decisions or gotchas with specific (non-generic) titles" };
+  }
+  return { pass: true };
+}
+
+function checkProceduralSignal(extraction: ExtractionResult): QualityGateResult {
+  // Require at least one pattern with a non-generic pattern field (> 10 chars)
+  const hasSpecificPattern = extraction.patterns.some((p) => p.pattern.trim().length > 10);
+  if (!hasSpecificPattern) {
+    return { pass: false, reason: "No patterns with specific content (> 10 chars)" };
+  }
+  return { pass: true };
+}
+
+function checkEpisodicSignal(extraction: ExtractionResult): QualityGateResult {
+  const { state } = extraction;
+
+  // Check if in_progress mentions specific files/features (not just generic phrases)
+  const hasSpecificInProgress =
+    !!state.in_progress &&
+    state.in_progress.trim().length > 5 &&
+    !GENERIC_EPISODIC_PHRASES.has(state.in_progress.trim().toLowerCase());
+
+  // Check if there's at least one concrete next_step
+  const hasConcreteNextStep = (state.next_steps ?? []).some((step) => step.trim().length > 5);
+
+  if (!hasSpecificInProgress && !hasConcreteNextStep) {
+    return { pass: false, reason: "No specific in_progress description or concrete next steps" };
+  }
+  return { pass: true };
+}
+
+function isOnlyPadding(content: string, _extraction: ExtractionResult): boolean {
+  // Strip known padding additions from semanticDetails to find original content.
+  // Only reject when original content is trivially empty (structural headers only, no real info).
+  const lines = content.split("\n");
+  const paddingPrefixes = ["Session summary:", "Project:", "Memory focus:", "Related files:", "Tags:"];
+  const originalLines = lines.filter(
+    (line) => !paddingPrefixes.some((prefix) => line.trim().startsWith(prefix))
+  );
+  const originalContent = originalLines.join("\n").trim();
+  // Conservative: only reject when there's essentially nothing beyond markdown headers
+  // (e.g., "## State" alone = 8 chars). Real content like "In progress: Fix cap" is kept.
+  const WITHOUT_HEADERS = originalContent.replace(/^##\s+\S+.*$/gm, "").trim();
+  return WITHOUT_HEADERS.length === 0 && content.length > originalContent.length;
 }
 
 function renderFactContent(extraction: ExtractionResult, options: BuildOptions): string {

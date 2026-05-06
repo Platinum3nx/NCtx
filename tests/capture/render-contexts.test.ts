@@ -74,7 +74,7 @@ test("memoryTypesForExtraction omits empty placeholders", () => {
 });
 
 test("buildContextDrafts emits typed drafts and does not include install metadata", () => {
-  const drafts = buildContextDrafts({
+  const { drafts } = buildContextDrafts({
     extraction,
     captureId: "capture-1",
     sessionId: "sid",
@@ -104,7 +104,7 @@ test("buildContextDrafts emits typed drafts and does not include install metadat
 });
 
 test("buildContextDrafts strips caller-supplied install tags", () => {
-  const drafts = buildContextDrafts({
+  const { drafts } = buildContextDrafts({
     extraction: {
       ...extraction,
       tags: ["stripe", "install:spoofed"]
@@ -134,4 +134,49 @@ test("makeCaptureId creates a filesystem-friendly dated slug", () => {
     makeCaptureId("2026-05-04T14:32:00Z", "Stripe webhook session!", "session-end"),
     "2026-05-04T14-32-00Z-stripe-webhook-session"
   );
+});
+
+test("prompt includes prior captures section when priorCaptures provided", () => {
+  const prompt = buildExtractionPrompt({
+    transcriptText: "USER: Continue the work.",
+    claudeMd: "Some project context.",
+    priorCaptures: [
+      "Chose idempotent webhook handler with Redis-backed dedup",
+      "Implemented retry logic with exponential backoff"
+    ]
+  });
+
+  assert.match(prompt, /Previously captured from this same session \(do not re-extract these\):/);
+  assert.match(prompt, /- Chose idempotent webhook handler with Redis-backed dedup/);
+  assert.match(prompt, /- Implemented retry logic with exponential backoff/);
+});
+
+test("prompt omits prior captures section when priorCaptures is empty", () => {
+  const prompt = buildExtractionPrompt({
+    transcriptText: "USER: Do something.",
+    claudeMd: "Context.",
+    priorCaptures: []
+  });
+
+  assert.doesNotMatch(prompt, /Previously captured from this same session/);
+});
+
+test("prompt caps prior captures at 5 entries", () => {
+  const prompt = buildExtractionPrompt({
+    transcriptText: "USER: Work.",
+    claudeMd: "",
+    priorCaptures: [
+      "Summary 1",
+      "Summary 2",
+      "Summary 3",
+      "Summary 4",
+      "Summary 5",
+      "Summary 6 should be excluded",
+      "Summary 7 should be excluded"
+    ]
+  });
+
+  assert.match(prompt, /- Summary 5/);
+  assert.doesNotMatch(prompt, /Summary 6/);
+  assert.doesNotMatch(prompt, /Summary 7/);
 });
