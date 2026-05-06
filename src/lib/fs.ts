@@ -34,6 +34,10 @@ export function pendingDir(cwd: string): string {
   return join(nctxDir(cwd), "pending");
 }
 
+export function spoolDir(cwd: string): string {
+  return join(nctxDir(cwd), "spool");
+}
+
 export function sessionsDir(cwd: string): string {
   return join(nctxDir(cwd), "sessions");
 }

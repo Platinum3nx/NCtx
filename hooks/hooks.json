@@ -5,8 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ \"$NCTX_INTERNAL\" = \"1\" ]; then exit 0; fi; node \"${CLAUDE_PLUGIN_ROOT}/dist/cli/index.js\" capture --trigger=session-end",
-            "async": true,
+            "command": "if [ \"$NCTX_INTERNAL\" = \"1\" ]; then exit 0; fi; node \"${CLAUDE_PLUGIN_ROOT}/dist/cli/index.js\" capture --trigger=session-end --detach",
             "timeout": 60
           }
         ]

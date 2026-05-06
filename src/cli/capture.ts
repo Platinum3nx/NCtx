@@ -1,5 +1,8 @@
-import { readdir, readFile, stat } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { readdir, readFile, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import YAML from "yaml";
 import type { ContextDraft, HookInput, NctxConfig, Trigger } from "../types.js";
 import { findProjectRoot, loadConfig } from "../config/load.js";
@@ -15,13 +18,21 @@ import {
   transcriptToText,
   writeSessionCursor
 } from "../capture/transcript.js";
-import { memoryDir, pendingDir, sessionsDir } from "../lib/fs.js";
+import { ensureDir, memoryDir, pendingDir, readJson, sessionsDir, spoolDir, writeJson } from "../lib/fs.js";
 import { withFileLock } from "../lib/lock.js";
 import { asErrorMessage, logError } from "../lib/log.js";
 import { drainPendingContexts, queuePending, removePendingContext } from "../lib/pending.js";
 import { makeClient } from "../nia/hosted.js";
 
 const DEFAULT_STDIN_TIMEOUT_MS = 10_000;
+const DEFAULT_DETACH_STDIN_TIMEOUT_MS = 1_000;
+
+type CaptureSpool = {
+  trigger: Trigger;
+  raw_hook_input: string;
+  created_at: string;
+  session_id: string;
+};
 
 export async function runCapture(trigger: Trigger, inputStream: NodeJS.ReadableStream = process.stdin): Promise<void> {
   if (process.env.NCTX_INTERNAL === "1") return;
@@ -95,6 +106,50 @@ export async function runCapture(trigger: Trigger, inputStream: NodeJS.ReadableS
     });
   } catch (err) {
     await logCaptureError(cwd, `Capture failed: ${asErrorMessage(err)}`, err);
+  }
+}
+
+export async function runCaptureDetached(
+  trigger: Trigger,
+  inputStream: NodeJS.ReadableStream = process.stdin
+): Promise<void> {
+  if (process.env.NCTX_INTERNAL === "1") return;
+
+  let cwd = process.cwd();
+
+  try {
+    const raw = await readStdin(inputStream, detachStdinTimeoutMs());
+    const input = parseHookInput(raw, trigger);
+    const hookCwd = input.cwd || cwd;
+    const projectRoot = findProjectRoot(hookCwd);
+    if (!projectRoot) return;
+    cwd = projectRoot;
+
+    const spoolPath = await writeCaptureSpool(cwd, trigger, raw, input);
+    spawnDetachedCapture(cwd, spoolPath);
+  } catch (err) {
+    await logCaptureError(cwd, `Detached capture handoff failed: ${asErrorMessage(err)}`, err);
+  }
+}
+
+export async function runCaptureFromSpool(spoolPath: string): Promise<void> {
+  let cwd = process.cwd();
+  let shouldRemove = false;
+
+  try {
+    const spool = validateCaptureSpool(await readJson<unknown>(spoolPath));
+    const input = parseHookInput(spool.raw_hook_input, spool.trigger);
+    const projectRoot = findProjectRoot(input.cwd || cwd);
+    if (projectRoot) cwd = projectRoot;
+
+    await runCapture(spool.trigger, Readable.from([spool.raw_hook_input]));
+    shouldRemove = true;
+  } catch (err) {
+    await logCaptureError(cwd, `Detached capture worker failed: ${asErrorMessage(err)}`, err);
+  } finally {
+    if (shouldRemove) {
+      await unlink(spoolPath).catch((err) => logCaptureError(cwd, "Failed to remove capture spool file", err));
+    }
   }
 }
 
@@ -189,6 +244,13 @@ function stdinTimeoutMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_STDIN_TIMEOUT_MS;
 }
 
+function detachStdinTimeoutMs(): number {
+  const raw = process.env.NCTX_DETACH_STDIN_TIMEOUT_MS;
+  if (!raw) return DEFAULT_DETACH_STDIN_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_DETACH_STDIN_TIMEOUT_MS;
+}
+
 function destroyInput(input: NodeJS.ReadableStream): void {
   const destroyable = input as NodeJS.ReadableStream & { destroy?: () => void };
   if (typeof destroyable.destroy === "function") destroyable.destroy();
@@ -196,6 +258,61 @@ function destroyInput(input: NodeJS.ReadableStream): void {
 
 function sessionCaptureLockPath(cwd: string, sessionId: string): string {
   return join(sessionsDir(cwd), `${safeSessionFilePart(sessionId)}.lock`);
+}
+
+async function writeCaptureSpool(cwd: string, trigger: Trigger, rawHookInput: string, input: HookInput): Promise<string> {
+  const dir = spoolDir(cwd);
+  await ensureDir(dir);
+  const fileName = `${Date.now()}-${safeSessionFilePart(input.session_id)}-${randomUUID()}.json`;
+  const path = join(dir, fileName);
+  await writeJson(
+    path,
+    {
+      trigger,
+      raw_hook_input: rawHookInput,
+      created_at: new Date().toISOString(),
+      session_id: input.session_id
+    } satisfies CaptureSpool,
+    { mode: 0o600 }
+  );
+  return path;
+}
+
+function spawnDetachedCapture(cwd: string, spoolPath: string): void {
+  const entrypoint = process.argv[1];
+  if (!entrypoint) throw new Error("Unable to locate NCtx CLI entrypoint for detached capture.");
+
+  const env: NodeJS.ProcessEnv = { ...process.env, NCTX_DETACHED_CAPTURE: "1" };
+  delete env.NCTX_INTERNAL;
+
+  const child = spawn(process.execPath, [...process.execArgv, entrypoint, "capture", "--from-spool", spoolPath], {
+    cwd,
+    detached: true,
+    env,
+    stdio: "ignore"
+  });
+  child.unref();
+}
+
+function validateCaptureSpool(value: unknown): CaptureSpool {
+  if (!isRecord(value)) throw new Error("Capture spool must be a JSON object.");
+  if (value.trigger !== "session-end" && value.trigger !== "precompact" && value.trigger !== "manual") {
+    throw new Error("Capture spool has an invalid trigger.");
+  }
+  if (typeof value.raw_hook_input !== "string" || !value.raw_hook_input.trim()) {
+    throw new Error("Capture spool missing raw hook input.");
+  }
+  if (typeof value.created_at !== "string" || !value.created_at.trim()) {
+    throw new Error("Capture spool missing created_at.");
+  }
+  if (typeof value.session_id !== "string" || !value.session_id.trim()) {
+    throw new Error("Capture spool missing session_id.");
+  }
+  return value as CaptureSpool;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

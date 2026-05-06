@@ -114,8 +114,7 @@ describe("Claude hook registration", () => {
                 {
                   type: "command",
                   command:
-                    'if [ "$NCTX_INTERNAL" = "1" ]; then exit 0; fi; node "${CLAUDE_PLUGIN_ROOT}/dist/cli/index.js" capture --trigger=session-end',
-                  async: true,
+                    'if [ "$NCTX_INTERNAL" = "1" ]; then exit 0; fi; node "${CLAUDE_PLUGIN_ROOT}/dist/cli/index.js" capture --trigger=session-end --detach',
                   timeout: 60
                 }
               ]
@@ -147,7 +146,7 @@ describe("Claude hook registration", () => {
     });
   });
 
-  it("adds guarded async hooks idempotently while preserving unrelated hooks", async () => {
+  it("adds guarded hooks idempotently while preserving unrelated hooks", async () => {
     const root = await tempRoot();
     const settingsPath = path.join(root, ".claude", "settings.json");
     await mkdir(path.dirname(settingsPath), { recursive: true });
@@ -179,13 +178,14 @@ describe("Claude hook registration", () => {
           event: "SessionEnd",
           registered: true,
           hasRecursionGuard: true,
-          isAsync: true,
+          isAsync: false,
           timeoutSeconds: 60
         }),
         expect.objectContaining({
           event: "PreCompact",
           registered: true,
-          hasRecursionGuard: true
+          hasRecursionGuard: true,
+          isAsync: true
         })
       ])
     );

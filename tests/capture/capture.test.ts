@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHostedConfig, saveConfig } from "../../src/config/load.js";
-import { memoryDir, sessionsDir } from "../../src/lib/fs.js";
+import { memoryDir, sessionsDir, spoolDir } from "../../src/lib/fs.js";
 import type { ExtractionResult } from "../../src/types.js";
 
 const mocks = vi.hoisted(() => ({
@@ -122,5 +122,64 @@ describe("runCapture", () => {
     expect(memory).toContain("fact: ctx_fact");
     await expect(readFile(join(sessionsDir(root), "nested-session.pos"), "utf8")).resolves.toBe("1\n");
     expect(existsSync(join(nested, ".nctx"))).toBe(false);
+  });
+
+  it("runs capture from a detached spool file and removes the spool after processing", async () => {
+    const root = await tempRoot();
+    await saveConfig(
+      root,
+      createHostedConfig({
+        installToken: "nctx_it_hosted_install_token_long_enough",
+        proxyUrl: "https://worker.example",
+        projectName: "demo",
+        projectRoot: root
+      })
+    );
+    const transcriptPath = join(root, "session.jsonl");
+    await writeFile(
+      transcriptPath,
+      JSON.stringify({ type: "user", message: { content: "remember detached session end" } }),
+      "utf8"
+    );
+    const extraction: ExtractionResult = {
+      summary: "Detached capture",
+      tags: ["detached"],
+      files_touched: ["src/app.ts"],
+      decisions: [{ title: "Detach SessionEnd", rationale: "SessionEnd hands off capture work." }],
+      gotchas: [],
+      patterns: [],
+      state: { in_progress: null, next_steps: [], files: [] }
+    };
+    mocks.extractMemory.mockResolvedValue(extraction);
+    await mkdir(spoolDir(root), { recursive: true });
+    const spoolPath = join(spoolDir(root), "capture-spool.json");
+    const rawHookInput = JSON.stringify({
+      session_id: "detached/session",
+      transcript_path: transcriptPath,
+      cwd: root
+    });
+    await writeFile(
+      spoolPath,
+      JSON.stringify({
+        trigger: "session-end",
+        raw_hook_input: rawHookInput,
+        created_at: new Date().toISOString(),
+        session_id: "detached/session"
+      }),
+      "utf8"
+    );
+    const { runCaptureFromSpool } = await import("../../src/cli/capture.js");
+
+    await runCaptureFromSpool(spoolPath);
+
+    expect(existsSync(spoolPath)).toBe(false);
+    expect(mocks.extractMemory).toHaveBeenCalledWith(
+      expect.stringContaining("USER: remember detached session end"),
+      "",
+      []
+    );
+    const memoryFiles = await readdir(memoryDir(root));
+    expect(memoryFiles.filter((entry) => entry.endsWith(".md"))).toHaveLength(1);
+    await expect(readFile(join(sessionsDir(root), "detached-session.pos"), "utf8")).resolves.toBe("1\n");
   });
 });

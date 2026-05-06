@@ -20,7 +20,9 @@ describe("capture CLI exit behavior", () => {
     const result = await runCli(["capture"], { cwd });
 
     expect(result.code).toBe(0);
-    expect(result.stderr).toContain("Missing required argument: trigger");
+    await expect(readFile(join(cwd, ".nctx", "errors.log"), "utf8")).resolves.toContain(
+      "Missing required argument: trigger"
+    );
   });
 
   it("exits 0 and logs for capture handler errors", async () => {

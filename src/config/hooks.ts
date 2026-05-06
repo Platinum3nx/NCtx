@@ -6,8 +6,8 @@ import { PACKAGE_NAME } from "../lib/constants.js";
 type HookCommand = {
   type: "command";
   command: string;
-  async: true;
-  timeout: number;
+  async?: true;
+  timeout?: number;
 };
 
 type ClaudeSettings = {
@@ -41,7 +41,7 @@ type HookInspection = {
 };
 
 const SESSION_COMMAND =
-  `if [ "$NCTX_INTERNAL" = "1" ]; then exit 0; fi; npx -y ${PACKAGE_NAME} capture --trigger=session-end`;
+  `if [ "$NCTX_INTERNAL" = "1" ]; then exit 0; fi; npx -y ${PACKAGE_NAME} capture --trigger=session-end --detach`;
 const PRECOMPACT_COMMAND =
   `if [ "$NCTX_INTERNAL" = "1" ]; then exit 0; fi; npx -y ${PACKAGE_NAME} capture --trigger=precompact`;
 
@@ -54,7 +54,12 @@ async function readSettings(path: string): Promise<ClaudeSettings> {
   return JSON.parse(await readFile(path, "utf8")) as ClaudeSettings;
 }
 
-function upsertHook(settings: ClaudeSettings, event: "SessionEnd" | "PreCompact", command: string): void {
+function upsertHook(
+  settings: ClaudeSettings,
+  event: "SessionEnd" | "PreCompact",
+  command: string,
+  options: { async: boolean; timeout: number }
+): void {
   settings.hooks ??= {};
   const current = settings.hooks[event] ?? [];
   const withoutNctx = current
@@ -64,16 +69,14 @@ function upsertHook(settings: ClaudeSettings, event: "SessionEnd" | "PreCompact"
     }))
     .filter((group) => (group.hooks ?? []).length > 0);
 
-  withoutNctx.push({
-    hooks: [
-      {
-        type: "command",
-        command,
-        async: true,
-        timeout: 60
-      }
-    ]
-  });
+  const hook: HookCommand = {
+    type: "command",
+    command,
+    timeout: options.timeout
+  };
+  if (options.async) hook.async = true;
+
+  withoutNctx.push({ hooks: [hook] });
   settings.hooks[event] = withoutNctx;
 }
 
@@ -81,8 +84,8 @@ export async function registerHooks(cwd: string): Promise<void> {
   const path = claudeSettingsPath(cwd);
   await mkdir(dirname(path), { recursive: true });
   const settings = await readSettings(path);
-  upsertHook(settings, "SessionEnd", SESSION_COMMAND);
-  upsertHook(settings, "PreCompact", PRECOMPACT_COMMAND);
+  upsertHook(settings, "SessionEnd", SESSION_COMMAND, { async: false, timeout: 60 });
+  upsertHook(settings, "PreCompact", PRECOMPACT_COMMAND, { async: true, timeout: 60 });
   await writeFile(path, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
 }
 

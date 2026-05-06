@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import type { NctxConfig } from "../types.js";
-import { memoryDir, nctxDir, pendingDir, readJson, sessionsDir, writeJson, ensureDir } from "../lib/fs.js";
+import { memoryDir, nctxDir, pendingDir, readJson, sessionsDir, spoolDir, writeJson, ensureDir } from "../lib/fs.js";
 
 export type ConfigValidationResult = {
   ok: boolean;
@@ -51,7 +51,12 @@ export function sessionsCursorDir(cwd: string): string {
 }
 
 export async function ensureNctxDirs(cwd: string): Promise<void> {
-  await Promise.all([ensureDir(memoryDir(cwd)), ensureDir(pendingDir(cwd)), ensureDir(sessionsDir(cwd))]);
+  await Promise.all([
+    ensureDir(memoryDir(cwd)),
+    ensureDir(pendingDir(cwd)),
+    ensureDir(spoolDir(cwd)),
+    ensureDir(sessionsDir(cwd))
+  ]);
 }
 
 export function defaultProjectName(cwd: string): string {

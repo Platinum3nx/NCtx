@@ -2,7 +2,7 @@
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import { PACKAGE_VERSION } from "../lib/constants.js";
-import { runCapture } from "./capture.js";
+import { runCapture, runCaptureDetached, runCaptureFromSpool } from "./capture.js";
 import { runDoctor } from "./doctor.js";
 import { runInit } from "./init.js";
 import { runList } from "./list.js";
@@ -63,13 +63,29 @@ async function main(): Promise<void> {
       "capture",
       "Run capture from Claude Code hook JSON on stdin",
       (builder) =>
-        builder.option("trigger", {
-          type: "string",
-          choices: ["session-end", "precompact", "manual"] as const,
-          demandOption: true
-        }),
+        builder
+          .option("trigger", {
+            type: "string",
+            choices: ["session-end", "precompact", "manual"] as const
+          })
+          .option("detach", {
+            type: "boolean",
+            default: false,
+            describe: "Queue hook input and spawn detached capture worker"
+          })
+          .option("from-spool", {
+            type: "string",
+            describe: "Run capture from a detached hook spool file"
+          }),
       async (argv) => {
-        await runCapture(argv.trigger as Trigger);
+        if (argv.fromSpool) {
+          await runCaptureFromSpool(String(argv.fromSpool));
+          return;
+        }
+        if (!argv.trigger) throw new Error("Missing required argument: trigger");
+        const trigger = argv.trigger as Trigger;
+        if (argv.detach) await runCaptureDetached(trigger);
+        else await runCapture(trigger);
       }
     )
     .command("mcp", "Run NCtx MCP server on stdio", {}, async () => {
