@@ -1,10 +1,15 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-export function readClaudeMd(cwd: string, maxBytes = 4096): string {
+export async function readClaudeMd(cwd: string, maxBytes = 4096): Promise<string> {
   const path = join(cwd, "CLAUDE.md");
-  if (!existsSync(path)) return "";
-  const bytes = readFileSync(path);
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(path);
+  } catch (err: any) {
+    if (err?.code === "ENOENT") return "";
+    throw err;
+  }
   return bytes.subarray(0, safeUtf8ByteCap(bytes, maxBytes)).toString("utf8");
 }
 

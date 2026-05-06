@@ -53,6 +53,9 @@ export async function transcriptToText(
   const toolActions: ToolAction[] = [];
   const seenToolActions = new Set<string>();
   let lineNumber = 0;
+  // nextLine tracks the position of the last successfully JSON.parse'd JSONL record + 1.
+  // Empty lines are skipped (they don't affect cursor position). Malformed final lines
+  // (partially written) are not advanced past, so they'll be re-read on the next capture.
   let nextLine = sinceLine;
 
   const lines = createInterface({

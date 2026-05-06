@@ -64,8 +64,8 @@ export function buildClaudeArgs(schema: object = EXTRACTION_SCHEMA, capabilities
   return args;
 }
 
-export async function extractMemory(transcript: string, claudeMd: string): Promise<ExtractionResult> {
-  return extractWithClaude(buildExtractionPrompt(transcript, claudeMd), EXTRACTION_SCHEMA);
+export async function extractMemory(transcript: string, claudeMd: string, priorCaptures: string[] = []): Promise<ExtractionResult> {
+  return extractWithClaude(buildExtractionPrompt({ transcriptText: transcript, claudeMd, priorCaptures }), EXTRACTION_SCHEMA);
 }
 
 export function parseClaudeJsonOutput(stdout: string): ExtractionResult {

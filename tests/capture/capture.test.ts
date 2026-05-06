@@ -112,7 +112,8 @@ describe("runCapture", () => {
 
     expect(mocks.extractMemory).toHaveBeenCalledWith(
       expect.stringContaining("USER: remember the initialized root"),
-      "root project memory"
+      "root project memory",
+      []
     );
     const memoryFiles = await readdir(memoryDir(root));
     expect(memoryFiles.filter((entry) => entry.endsWith(".md"))).toHaveLength(1);

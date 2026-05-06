@@ -55,9 +55,15 @@ export const EXTRACTION_SCHEMA = {
   }
 } satisfies Record<string, unknown>;
 
-export function buildExtractionPrompt(input: string | { transcriptText: string; claudeMd?: string }, claudeMdArg = ""): string {
+export function buildExtractionPrompt(input: string | { transcriptText: string; claudeMd?: string; priorCaptures?: string[] }, claudeMdArg = ""): string {
   const transcript = typeof input === "string" ? input : input.transcriptText;
   const claudeMd = typeof input === "string" ? claudeMdArg : input.claudeMd ?? "";
+  const priorCaptures = typeof input === "string" ? [] : input.priorCaptures ?? [];
+
+  const priorCapturesSection = priorCaptures.length > 0
+    ? `\nPreviously captured from this same session (do not re-extract these):\n${priorCaptures.slice(0, 5).map(s => `- ${s}`).join("\n")}\n`
+    : "";
+
   return `You are analyzing a Claude Code session to extract durable knowledge that should
 survive into future sessions on this project.
 
@@ -68,7 +74,7 @@ knowledge or project-specific refinements not already captured there.
 <CLAUDE_MD>
 ${claudeMd}
 </CLAUDE_MD>
-
+${priorCapturesSection}
 The transcript below contains user messages and assistant responses. Tool
 outputs have been omitted. A compact tool action ledger is included at the end
 so you can cite files touched without seeing their full contents.

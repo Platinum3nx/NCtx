@@ -1,9 +1,12 @@
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import YAML from "yaml";
 import type { ContextDraft, HookInput, NctxConfig, Trigger } from "../types.js";
 import { findProjectRoot, loadConfig } from "../config/load.js";
 import { readClaudeMd } from "../capture/claude-md.js";
 import { buildContextDrafts } from "../capture/contexts.js";
 import { extractMemory } from "../capture/extract.js";
+import { filterDuplicateDrafts } from "../capture/fingerprint.js";
 import { backfillMemoryContextIds, writeMemoryFile } from "../capture/render.js";
 import {
   defaultCaptureId,
@@ -12,7 +15,7 @@ import {
   transcriptToText,
   writeSessionCursor
 } from "../capture/transcript.js";
-import { sessionsDir } from "../lib/fs.js";
+import { memoryDir, sessionsDir } from "../lib/fs.js";
 import { withFileLock } from "../lib/lock.js";
 import { asErrorMessage, logError } from "../lib/log.js";
 import { drainPendingContexts, queuePending } from "../lib/pending.js";
@@ -41,9 +44,10 @@ export async function runCapture(trigger: Trigger, inputStream: NodeJS.ReadableS
       }
 
       const claudeMd = await readClaudeMd(cwd);
-      const extraction = await extractMemory(parsed.text, claudeMd);
+      const priorCaptures = await priorSessionSummaries(cwd, input.session_id);
+      const extraction = await extractMemory(parsed.text, claudeMd, priorCaptures);
       const captureId = defaultCaptureId(input.session_id);
-      const drafts = buildContextDrafts(extraction, {
+      const { drafts, skippedDrafts } = buildContextDrafts(extraction, {
         captureId,
         projectName: config.project_name,
         sessionId: input.session_id,
@@ -53,6 +57,26 @@ export async function runCapture(trigger: Trigger, inputStream: NodeJS.ReadableS
         nctxVersion: config.version
       });
 
+      for (const skipped of skippedDrafts) {
+        await logError(cwd, `Skipped low-signal ${skipped.memoryType} context: ${skipped.reason}`);
+      }
+
+      // Dedup: filter out drafts whose fingerprint matches an already-pushed memory
+      const existingFingerprints = await readExistingFingerprints(cwd, input.session_id);
+      const { toPublish, skipped: dedupSkipped } = filterDuplicateDrafts(drafts, existingFingerprints);
+      for (const { draft, fingerprint } of dedupSkipped) {
+        await logError(
+          cwd,
+          `Skipped duplicate ${draft.memory_type} context (fingerprint ${fingerprint} matches existing capture)`
+        );
+      }
+
+      // If all drafts were skipped (quality gate + dedup), advance cursor and return without writing a file
+      if (toPublish.length === 0) {
+        await writeSessionCursor(cwd, input.session_id, parsed.nextLine);
+        return;
+      }
+
       const contextIds: Record<string, string> = {};
       const memoryPath = await writeMemoryFile(cwd, {
         captureId,
@@ -61,11 +85,12 @@ export async function runCapture(trigger: Trigger, inputStream: NodeJS.ReadableS
         hookInput: input,
         projectName: config.project_name,
         extraction,
-        drafts,
+        drafts: toPublish,
         contextIds
       });
       await writeSessionCursor(cwd, input.session_id, parsed.nextLine);
-      await pushDrafts(cwd, config, drafts, captureId, memoryPath, contextIds);
+
+      await pushDrafts(cwd, config, toPublish, captureId, memoryPath, contextIds);
       await backfillMemoryContextIds(memoryPath, contextIds);
     });
   } catch (err) {
@@ -172,10 +197,84 @@ function sessionCaptureLockPath(cwd: string, sessionId: string): string {
   return join(sessionsDir(cwd), `${safeSessionFilePart(sessionId)}.lock`);
 }
 
+async function priorSessionSummaries(cwd: string, sessionId: string): Promise<string[]> {
+  const dir = memoryDir(cwd);
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return [];
+  }
+
+  const summaries: string[] = [];
+  for (const entry of entries.filter((e) => e.endsWith(".md"))) {
+    try {
+      const raw = await readFile(join(dir, entry), "utf8");
+      const match = raw.match(/^---\n([\s\S]*?)\n---\n/);
+      if (!match) continue;
+      const fm = YAML.parse(match[1]) as Record<string, unknown>;
+      if (fm?.session_id === sessionId && typeof fm?.summary === "string") {
+        summaries.push(fm.summary);
+      }
+    } catch {
+      // Skip unreadable files
+    }
+  }
+  return summaries;
+}
+
 async function logCaptureError(cwd: string, message: string, err?: unknown): Promise<void> {
   try {
     await logError(cwd, message, err);
   } catch {
     // Capture hooks must never fail the host command because local logging failed.
   }
+}
+
+/**
+ * Read fingerprints from existing memory files for a given session.
+ * Only includes fingerprints from memories that have been successfully pushed
+ * (i.e., have a non-empty context_id for the given memory type).
+ */
+async function readExistingFingerprints(cwd: string, sessionId: string): Promise<Set<string>> {
+  const fingerprints = new Set<string>();
+  const dir = memoryDir(cwd);
+
+  let files: string[];
+  try {
+    files = await readdir(dir);
+  } catch {
+    // Directory may not exist yet on first capture
+    return fingerprints;
+  }
+
+  const mdFiles = files.filter((f) => f.endsWith(".md"));
+  for (const file of mdFiles) {
+    try {
+      const raw = await readFile(join(dir, file), "utf8");
+      const match = raw.match(/^---\n([\s\S]*?)\n---\n/);
+      if (!match) continue;
+
+      // Quick check: does this file belong to the same session?
+      if (!raw.includes(sessionId)) continue;
+
+      const frontmatter = YAML.parse(match[1]) as Record<string, unknown>;
+      if (frontmatter.session_id !== sessionId) continue;
+
+      // Only count fingerprints from successfully pushed drafts (those with context_ids)
+      const contextIds = frontmatter.context_ids as Record<string, string> | undefined;
+      const fps = frontmatter.fingerprints as Record<string, string> | undefined;
+      if (!fps || typeof fps !== "object") continue;
+
+      for (const [memoryType, fp] of Object.entries(fps)) {
+        if (contextIds && contextIds[memoryType]) {
+          fingerprints.add(fp);
+        }
+      }
+    } catch {
+      // Skip unreadable files
+    }
+  }
+
+  return fingerprints;
 }

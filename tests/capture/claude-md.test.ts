@@ -5,27 +5,27 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readClaudeMd } from "../../src/capture/claude-md.js";
 
-test("readClaudeMd returns empty string when project memory is absent", () => {
+test("readClaudeMd returns empty string when project memory is absent", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "nctx-claude-md-empty-"));
-  assert.equal(readClaudeMd(cwd), "");
+  assert.equal(await readClaudeMd(cwd), "");
 });
 
-test("readClaudeMd caps CLAUDE.md content at the requested byte budget", () => {
+test("readClaudeMd caps CLAUDE.md content at the requested byte budget", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "nctx-claude-md-"));
   writeFileSync(join(cwd, "CLAUDE.md"), `${"a".repeat(5000)}distinctive-tail`, "utf8");
 
-  const content = readClaudeMd(cwd, 4096);
+  const content = await readClaudeMd(cwd, 4096);
 
   assert.equal(Buffer.byteLength(content), 4096);
   assert.doesNotMatch(content, /distinctive-tail/);
 });
 
-test("readClaudeMd does not split multi-byte UTF-8 characters at the byte cap", () => {
+test("readClaudeMd does not split multi-byte UTF-8 characters at the byte cap", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "nctx-claude-md-utf8-"));
   writeFileSync(join(cwd, "CLAUDE.md"), "prefix 🧠 suffix", "utf8");
 
   const capInsideEmoji = Buffer.byteLength("prefix ", "utf8") + 1;
-  const content = readClaudeMd(cwd, capInsideEmoji);
+  const content = await readClaudeMd(cwd, capInsideEmoji);
 
   assert.equal(content, "prefix ");
   assert.equal(content.includes("\uFFFD"), false);
