@@ -27,6 +27,6 @@ node "${CLAUDE_PLUGIN_ROOT}/dist/cli/index.js" doctor
 
 ## Recall Memory
 
-Use the `nctx_memory` MCP tool when the user references prior sessions, asks where work left off, or when past decisions, gotchas, project patterns, or current state would help.
+Use the `nctx_memory` MCP tool proactively for nontrivial work when resuming a task, touching unfamiliar files, debugging a previously seen failure, or before making architecture/design decisions. Prefer focused queries tied to the current task. Do not call for tiny one-off edits where prior context is unlikely to matter.
 
 Never ask the user for a Nia API key. Hosted NCtx uses an install token stored in `.nctx/config.json`; the enterprise Nia key lives only in the hosted Worker.

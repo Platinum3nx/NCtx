@@ -52,7 +52,7 @@ export function createMcpServer(options: McpServerOptions = {}): Server {
       {
         name: MEMORY_TOOL_NAME,
         description:
-          "Search past Claude Code session memories for this project. Use when the user references prior work, asks where we left off, or past decisions/gotchas/patterns would help.",
+          "Search past Claude Code session memories for this project. Use proactively for nontrivial work when resuming a task, touching unfamiliar files, debugging a previously seen failure, or before making architecture/design decisions. Prefer focused queries tied to the user's current task. Do not call for tiny one-off edits where prior context is unlikely to matter.",
         inputSchema: {
           type: "object",
           properties: {
@@ -84,7 +84,7 @@ export function createCallToolHandler(options: McpServerOptions = {}) {
     try {
       const client = getClient();
       const results = await client.searchContexts(args.value.query, args.value.limit, args.value.mode);
-      return toolText(formatResults(results));
+      return toolText(formatResults(results, { compact: true, query: args.value.query }));
     } catch (error) {
       return toolError(errorMessage(error));
     }
