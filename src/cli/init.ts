@@ -39,15 +39,18 @@ export async function runInit(cwd: string, options: InitOptions): Promise<InitRe
   await ensureDir(pendingDir(cwd));
   await ensureDir(sessionsDir(cwd));
 
+  const proxyUrlChanged = existingConfig?.proxy_url != null &&
+    existingConfig.proxy_url !== proxyUrl;
+
   let installToken: string;
   let tokenAction: InitResult["tokenAction"];
 
   if (options.installToken) {
     installToken = options.installToken;
     tokenAction = "explicit";
-  } else if (options.rotateToken) {
+  } else if (options.rotateToken || proxyUrlChanged) {
     installToken = await mintInstall(proxyUrl, packageSecret);
-    tokenAction = "rotated";
+    tokenAction = proxyUrlChanged ? "minted" : "rotated";
   } else if (existingConfig?.install_token) {
     installToken = existingConfig.install_token;
     tokenAction = "reused";
