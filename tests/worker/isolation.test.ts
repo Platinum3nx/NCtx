@@ -564,6 +564,122 @@ describe("Worker install isolation helpers", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it("falls back to text search when semantic search returns 500", async () => {
+    const { default: worker } = await import("../../worker/src/index.js");
+    const env = makeEnv();
+    const installToken = await registerInstall(worker, env);
+    const upstreamUrls: string[] = [];
+
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      upstreamUrls.push(url.toString());
+      if (url.pathname.endsWith("/contexts/semantic-search")) {
+        return new Response(JSON.stringify({ error: "Internal Server Error" }), { status: 500 });
+      }
+
+      const installTag = url.searchParams.get("tags") ?? "install:missing";
+      return Response.json({
+        contexts: [
+          {
+            id: "text-result",
+            tags: [installTag, "project:alpha"],
+            agent_source: AGENT_SOURCE
+          }
+        ]
+      });
+    });
+
+    const response = await worker.fetch(
+      new Request("https://worker.example/contexts/semantic-search?q=recall&limit=3&project_name=alpha", {
+        headers: { Authorization: `Bearer ${installToken}` }
+      }),
+      env
+    );
+    const body = (await response.json()) as any;
+
+    expect(response.status).toBe(200);
+    expect(upstreamUrls).toHaveLength(2);
+    expect(upstreamUrls[0]).toContain("/contexts/semantic-search");
+    expect(upstreamUrls[1]).toContain("/contexts/search");
+    expect(body.results).toEqual([
+      {
+        id: "text-result",
+        tags: [new URL(upstreamUrls[1]).searchParams.get("tags"), "project:alpha"],
+        agent_source: AGENT_SOURCE
+      }
+    ]);
+    expect(body.search_metadata).toMatchObject({
+      text_fallback_used: true,
+      semantic_error: "Semantic upstream error 500"
+    });
+  });
+
+  it("does not crash the semantic search path when text fallback throws a network error", async () => {
+    const { default: worker } = await import("../../worker/src/index.js");
+    const env = makeEnv();
+    const installToken = await registerInstall(worker, env);
+
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/contexts/semantic-search")) {
+        // Semantic search succeeds but returns zero owned results
+        return Response.json({
+          results: [
+            {
+              id: "other-install",
+              tags: ["install:other"],
+              agent_source: AGENT_SOURCE
+            }
+          ],
+          search_metadata: { total_results: 1 }
+        });
+      }
+      // Text fallback throws a non-timeout network error (DNS, TLS, etc.)
+      throw new TypeError("fetch failed");
+    });
+
+    const response = await worker.fetch(
+      new Request("https://worker.example/contexts/semantic-search?q=crash&limit=3", {
+        headers: { Authorization: `Bearer ${installToken}` }
+      }),
+      env
+    );
+
+    // Should not throw — should return the (empty) semantic results gracefully
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as any;
+    expect(body.results).toEqual([]);
+  });
+
+  it("does not crash when text fallback throws during semantic failure path", async () => {
+    const { default: worker } = await import("../../worker/src/index.js");
+    const env = makeEnv();
+    const installToken = await registerInstall(worker, env);
+
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/contexts/semantic-search")) {
+        // Semantic search fails with 500
+        return new Response(JSON.stringify({ error: "Internal Server Error" }), { status: 500 });
+      }
+      // Text fallback also throws a network error
+      throw new TypeError("fetch failed");
+    });
+
+    const response = await worker.fetch(
+      new Request("https://worker.example/contexts/semantic-search?q=crash&limit=3", {
+        headers: { Authorization: `Bearer ${installToken}` }
+      }),
+      env
+    );
+
+    // Should not throw — should return 502 since both paths failed
+    expect(response.status).toBe(502);
+    const body = (await response.json()) as any;
+    expect(body.error).toBe("Upstream error");
+    expect(body.detail).toContain("Semantic upstream error 500");
+  });
+
   it("does not consume the daily cap for unrouted paths", async () => {
     const { default: worker } = await import("../../worker/src/index.js");
     let capCalls = 0;

@@ -14,6 +14,7 @@ import {
   requestedTextLimit,
   sha256Hex
 } from "./isolation";
+import type { SemanticSearchRequest } from "./isolation";
 
 export interface Env {
   NIA_API_KEY: string;
@@ -182,35 +183,59 @@ async function forwardSemanticSearch(request: Request, env: Env, installTag: str
     headers: { Authorization: `Bearer ${env.NIA_API_KEY}` }
   });
 
-  if (!upstream.ok) {
-    return json({ error: "Upstream error", status: upstream.status }, upstream.status >= 500 ? 502 : upstream.status);
-  }
+  // If semantic succeeds, process normally
+  if (upstream.ok) {
+    let body: unknown;
+    try {
+      body = await upstream.json();
+    } catch {
+      // Semantic returned non-JSON — fall through to text fallback
+      return textFallbackOrError(request, env, installTag, search, "Upstream returned non-JSON response");
+    }
 
-  let body: unknown;
-  try {
-    body = await upstream.json();
-  } catch {
-    return json({ error: "Upstream returned non-JSON response" }, 502);
-  }
+    const filtered = filterSemanticSearchResponse(body, installTag, search.requestedLimit, search.projectTag);
+    if (searchResults(filtered).length >= search.requestedLimit) {
+      return json(filtered, upstream.status);
+    }
 
-  const filtered = filterSemanticSearchResponse(body, installTag, search.requestedLimit, search.projectTag);
-  if (searchResults(filtered).length >= search.requestedLimit) {
+    // Semantic returned fewer results than requested — supplement with text fallback
+    const fallbackResults = await safeTextFallback(request, env, installTag, search.requestedLimit, search.projectTag);
+    if (fallbackResults.length) {
+      filtered.results = mergeSearchResults(searchResults(filtered), fallbackResults, search.requestedLimit);
+      const existingMeta = isRecord(filtered.search_metadata) ? filtered.search_metadata : {};
+      filtered.search_metadata = {
+        ...existingMeta,
+        total_results: searchResults(filtered).length,
+        text_fallback_used: true
+      };
+    }
     return json(filtered, upstream.status);
   }
 
+  // Semantic failed — try text fallback before returning error
+  return textFallbackOrError(request, env, installTag, search, `Semantic upstream error ${upstream.status}`);
+}
+
+async function textFallbackOrError(
+  request: Request,
+  env: Env,
+  installTag: string,
+  search: SemanticSearchRequest,
+  semanticError: string
+): Promise<Response> {
   const fallbackResults = await safeTextFallback(request, env, installTag, search.requestedLimit, search.projectTag);
   if (fallbackResults.length) {
-    filtered.results = mergeSearchResults(searchResults(filtered), fallbackResults, search.requestedLimit);
-    // Ensure search_metadata exists even if upstream didn't provide it
-    const existingMeta = isRecord(filtered.search_metadata) ? filtered.search_metadata : {};
-    filtered.search_metadata = {
-      ...existingMeta,
-      total_results: searchResults(filtered).length,
-      text_fallback_used: true
-    };
+    return json({
+      results: fallbackResults.slice(0, search.requestedLimit),
+      search_metadata: {
+        total_results: Math.min(fallbackResults.length, search.requestedLimit),
+        text_fallback_used: true,
+        semantic_error: semanticError
+      }
+    });
   }
-
-  return json(filtered, upstream.status);
+  // Both semantic and text failed
+  return json({ error: "Upstream error", detail: semanticError }, 502);
 }
 
 async function forwardTextSearch(request: Request, env: Env, installTag: string): Promise<Response> {
@@ -248,20 +273,25 @@ async function safeTextFallback(
   requestedLimit: number,
   projectTag: string | null
 ): Promise<unknown[]> {
-  const upstream = await fetchNia(buildTextSearchUrl(request.url, installTag), {
-    headers: { Authorization: `Bearer ${env.NIA_API_KEY}` }
-  });
-  if (!upstream.ok) return [];
-
-  let body: unknown;
   try {
-    body = await upstream.json();
+    const upstream = await fetchNia(buildTextSearchUrl(request.url, installTag), {
+      headers: { Authorization: `Bearer ${env.NIA_API_KEY}` }
+    });
+    if (!upstream.ok) return [];
+
+    let body: unknown;
+    try {
+      body = await upstream.json();
+    } catch {
+      return [];
+    }
+
+    const filtered = filterTextSearchResponse(body, installTag, requestedLimit, projectTag);
+    return searchResults(filtered);
   } catch {
+    // Any fallback failure (network, DNS, TLS, unexpected) should not crash the primary search path
     return [];
   }
-
-  const filtered = filterTextSearchResponse(body, installTag, requestedLimit, projectTag);
-  return searchResults(filtered);
 }
 
 function searchResults(body: Record<string, unknown>): unknown[] {

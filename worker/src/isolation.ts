@@ -156,6 +156,13 @@ export function filterSemanticSearchResponse(
 
   body.results = results;
 
+  if (Array.isArray(body.contexts)) {
+    body.contexts = (body.contexts as unknown[])
+      .filter((result) => isOwnedByInstall(result, installTag) && isInProjectScope(result, projectTag))
+      .map((result) => normalizeMemoryTypeFromTags(result))
+      .slice(0, requestedLimit);
+  }
+
   if (isRecord(body.search_metadata)) {
     body.search_metadata = {
       ...body.search_metadata,
