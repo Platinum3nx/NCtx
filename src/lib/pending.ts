@@ -12,6 +12,8 @@ export type PendingContext = {
   last_error?: string;
   attempts?: number;
   created_at?: string;
+  saved_context_id?: string;
+  saved_at?: string;
 };
 
 export type PendingContextFile = PendingContext & {
@@ -140,9 +142,28 @@ async function drainPendingContextsUnlocked(
   const failed: DrainPendingResult["failed"] = [...listed.corrupt];
 
   for (const item of pending) {
+    // If this item was already saved (e.g., process died before backfill+delete),
+    // skip the saveContext call and surface it as saved so the caller can finish
+    // backfill and delete.
+    if (item.saved_context_id) {
+      saved.push({
+        file_path: item.file_path,
+        pending: item,
+        response: { id: item.saved_context_id } as Awaited<ReturnType<NiaClient["saveContext"]>>
+      });
+      continue;
+    }
     try {
       const response = await client.saveContext(item.draft);
-      await removePendingContext(item.file_path);
+      // Mark as saved but don't delete yet — let the caller delete after backfill
+      // to avoid losing the context_id if the process dies before backfill completes.
+      const savedItem: PendingContext = {
+        ...item,
+        saved_context_id: response.id,
+        saved_at: new Date().toISOString()
+      };
+      const { file_path: _, ...body } = savedItem as PendingContextFile;
+      await writePendingFile(item.file_path, body);
       saved.push({ file_path: item.file_path, pending: item, response });
     } catch (error) {
       const next = {

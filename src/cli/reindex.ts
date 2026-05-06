@@ -5,7 +5,7 @@ import type { ContextDraft, MemoryType, NctxConfig, Trigger } from "../types.js"
 import { backfillMemoryContextIds } from "../capture/render.js";
 import { findProjectRoot, loadConfig } from "../config/load.js";
 import { memoryDir } from "../lib/fs.js";
-import { drainPendingContexts, listPendingContexts, queuePending } from "../lib/pending.js";
+import { drainPendingContexts, listPendingContexts, queuePending, removePendingContext } from "../lib/pending.js";
 import { makeClient } from "../nia/hosted.js";
 
 const AGENT_SOURCE = "nctx-claude-code";
@@ -29,6 +29,7 @@ export async function runReindex(cwd: string): Promise<void> {
         [item.pending.draft.memory_type]: item.response.id
       });
     }
+    await removePendingContext(item.file_path);
   }
   for (const item of drained.failed) {
     console.error(`Still pending ${basename(item.file_path)}: ${item.error.message}`);

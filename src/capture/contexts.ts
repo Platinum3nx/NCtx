@@ -40,10 +40,10 @@ export function buildContextDrafts(
   const options = (hasInlineExtraction ? extractionOrInput : maybeOptions) as BuildContextDraftsInput & BuildOptions;
   if (!options) throw new Error("buildContextDrafts requires options.");
   const tags = normalizeTags([
-    ...(extraction.tags ?? []),
     `project:${options.projectName}`,
     options.trigger,
-    "nctx"
+    "nctx",
+    ...(extraction.tags ?? [])
   ]);
   const metadata = {
     nctx_version: options.nctxVersion ?? "0.1.0",

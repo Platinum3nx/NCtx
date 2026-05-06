@@ -7,7 +7,7 @@ import { readMemoryFrontmatter, runReindex } from "../../src/cli/reindex.js";
 import { memoryDir, pendingDir } from "../../src/lib/fs.js";
 import { HostedNiaClient, registerHostedInstall } from "../../src/nia/hosted.js";
 import { normalizeSearchResult } from "../../src/nia/client.js";
-import { drainPendingContexts, enqueuePendingContext, listPendingContexts, queuePending } from "../../src/lib/pending.js";
+import { drainPendingContexts, enqueuePendingContext, listPendingContexts, queuePending, removePendingContext } from "../../src/lib/pending.js";
 
 const roots: string[] = [];
 
@@ -152,6 +152,14 @@ describe("pending queue", () => {
     });
 
     expect(drained.saved).toHaveLength(1);
+    // Pending file is marked as saved but not yet deleted (caller deletes after backfill)
+    const stillPending = await listPendingContexts(root);
+    expect(stillPending).toHaveLength(1);
+    expect(stillPending[0].saved_context_id).toBe("ctx_episodic");
+    // Caller deletes after backfill
+    for (const item of drained.saved) {
+      await removePendingContext(item.file_path);
+    }
     expect(await listPendingContexts(root)).toHaveLength(0);
   });
 
@@ -190,6 +198,12 @@ describe("pending queue", () => {
 
     expect(drained.saved).toHaveLength(1);
     expect(drained.failed).toHaveLength(1);
+    // Both files still on disk: saved one is marked, failed one is updated with error
+    expect(await listPendingContexts(root)).toHaveLength(2);
+    // Caller deletes the saved file after backfill
+    for (const item of drained.saved) {
+      await removePendingContext(item.file_path);
+    }
     const remaining = await listPendingContexts(root);
     expect(remaining).toHaveLength(1);
     expect(remaining[0].draft.memory_type).toBe("procedural");
@@ -224,6 +238,12 @@ describe("pending queue", () => {
     expect(drained.failed).toHaveLength(1);
     expect(path.basename(drained.failed[0].file_path)).toBe("capture-corrupt.fact.json");
     await expect(readFile(corruptPath, "utf8")).resolves.toBe("{not-json");
+    // Saved file still on disk (marked with saved_context_id); corrupt file unparseable
+    expect(await listPendingContexts(root)).toHaveLength(1);
+    // Caller deletes saved file after backfill
+    for (const item of drained.saved) {
+      await removePendingContext(item.file_path);
+    }
     expect(await listPendingContexts(root)).toHaveLength(0);
   });
 
@@ -269,8 +289,14 @@ describe("pending queue", () => {
     releaseFirst();
     const results = await Promise.all([first, second]);
 
-    expect(results.flatMap((result) => result.saved)).toHaveLength(1);
+    // Both drains see the item as saved (first marks it, second detects saved_context_id)
+    const allSaved = results.flatMap((result) => result.saved);
+    expect(allSaved).toHaveLength(2);
+    // Only one actual saveContext call was made
     expect(saves).toBe(1);
+    // File still on disk until caller deletes after backfill
+    expect(await listPendingContexts(root)).toHaveLength(1);
+    await removePendingContext(allSaved[0].file_path);
     expect(await listPendingContexts(root)).toHaveLength(0);
   });
 

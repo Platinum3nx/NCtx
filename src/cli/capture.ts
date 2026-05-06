@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import YAML from "yaml";
 import type { ContextDraft, HookInput, NctxConfig, Trigger } from "../types.js";
@@ -15,10 +15,10 @@ import {
   transcriptToText,
   writeSessionCursor
 } from "../capture/transcript.js";
-import { memoryDir, sessionsDir } from "../lib/fs.js";
+import { memoryDir, pendingDir, sessionsDir } from "../lib/fs.js";
 import { withFileLock } from "../lib/lock.js";
 import { asErrorMessage, logError } from "../lib/log.js";
-import { drainPendingContexts, queuePending } from "../lib/pending.js";
+import { drainPendingContexts, queuePending, removePendingContext } from "../lib/pending.js";
 import { makeClient } from "../nia/hosted.js";
 
 const DEFAULT_STDIN_TIMEOUT_MS = 10_000;
@@ -61,7 +61,7 @@ export async function runCapture(trigger: Trigger, inputStream: NodeJS.ReadableS
         await logError(cwd, `Skipped low-signal ${skipped.memoryType} context: ${skipped.reason}`);
       }
 
-      // Dedup: filter out drafts whose fingerprint matches an already-pushed memory
+      // Dedup: filter out drafts whose fingerprint matches any existing local memory
       const existingFingerprints = await readExistingFingerprints(cwd, input.session_id);
       const { toPublish, skipped: dedupSkipped } = filterDuplicateDrafts(drafts, existingFingerprints);
       for (const { draft, fingerprint } of dedupSkipped) {
@@ -88,10 +88,10 @@ export async function runCapture(trigger: Trigger, inputStream: NodeJS.ReadableS
         drafts: toPublish,
         contextIds
       });
-      await writeSessionCursor(cwd, input.session_id, parsed.nextLine);
 
       await pushDrafts(cwd, config, toPublish, captureId, memoryPath, contextIds);
       await backfillMemoryContextIds(memoryPath, contextIds);
+      await writeSessionCursor(cwd, input.session_id, parsed.nextLine);
     });
   } catch (err) {
     await logCaptureError(cwd, `Capture failed: ${asErrorMessage(err)}`, err);
@@ -117,6 +117,7 @@ async function pushDrafts(
             [item.pending.draft.memory_type]: item.response.id
           });
         }
+        await removePendingContext(item.file_path);
       }
     })
     .catch((err) => logError(cwd, "Failed to drain pending contexts before capture push", err));
@@ -197,8 +198,15 @@ function sessionCaptureLockPath(cwd: string, sessionId: string): string {
   return join(sessionsDir(cwd), `${safeSessionFilePart(sessionId)}.lock`);
 }
 
+/**
+ * Read summaries from prior same-session captures, but ONLY from memories
+ * that have evidence of durable commitment (context_id or pending file).
+ * This prevents orphaned local files (written but never pushed/queued)
+ * from suppressing re-extraction on retry.
+ */
 async function priorSessionSummaries(cwd: string, sessionId: string): Promise<string[]> {
   const dir = memoryDir(cwd);
+  const pDir = pendingDir(cwd);
   let entries: string[];
   try {
     entries = await readdir(dir);
@@ -213,14 +221,50 @@ async function priorSessionSummaries(cwd: string, sessionId: string): Promise<st
       const match = raw.match(/^---\n([\s\S]*?)\n---\n/);
       if (!match) continue;
       const fm = YAML.parse(match[1]) as Record<string, unknown>;
-      if (fm?.session_id === sessionId && typeof fm?.summary === "string") {
-        summaries.push(fm.summary);
-      }
+      if (fm?.session_id !== sessionId || typeof fm?.summary !== "string") continue;
+
+      // Only include summaries from durably committed memories
+      if (!isDurablyCommitted(fm, pDir)) continue;
+
+      summaries.push(fm.summary);
     } catch {
       // Skip unreadable files
     }
   }
   return summaries;
+}
+
+/**
+ * A memory is durably committed if it has at least one context_id (pushed)
+ * or a corresponding pending file (queued). Orphaned local files that were
+ * written but never pushed/queued are NOT durably committed.
+ */
+async function isDurablyCommitted(fm: Record<string, unknown>, pDir: string): Promise<boolean> {
+  // Check for any context_id
+  if (
+    typeof fm.context_ids === "object" &&
+    fm.context_ids !== null &&
+    !Array.isArray(fm.context_ids) &&
+    Object.values(fm.context_ids as Record<string, unknown>).some(
+      (v) => (typeof v === "string" && v.trim()) || (Array.isArray(v) && v.length > 0)
+    )
+  ) {
+    return true;
+  }
+
+  // Check for a pending file
+  const captureId = typeof fm.id === "string" ? fm.id : undefined;
+  if (!captureId) return false;
+  const safeId = captureId.replace(/[^a-zA-Z0-9_.-]/g, "-");
+  for (const memoryType of ["fact", "procedural", "episodic"]) {
+    try {
+      await stat(join(pDir, `${safeId}.${memoryType}.json`));
+      return true;
+    } catch {
+      // No pending file for this type
+    }
+  }
+  return false;
 }
 
 async function logCaptureError(cwd: string, message: string, err?: unknown): Promise<void> {
@@ -232,13 +276,24 @@ async function logCaptureError(cwd: string, message: string, err?: unknown): Pro
 }
 
 /**
- * Read fingerprints from existing memory files for a given session.
- * Only includes fingerprints from memories that have been successfully pushed
- * (i.e., have a non-empty context_id for the given memory type).
+ * Read fingerprints from existing memory files, but ONLY for memories that have
+ * evidence of durable commitment — i.e., the draft was either:
+ *   1. Successfully pushed to Nia (has a `context_id` for that memory type), OR
+ *   2. Queued to pending (a `.nctx/pending/<id>.<type>.json` file exists).
+ *
+ * This prevents the "fingerprint dedup stranding" bug: if the process is killed
+ * after `writeMemoryFile` but before `pushDrafts` saves or queues, the next
+ * capture would see the fingerprint, skip the draft as duplicate, and the memory
+ * would never reach Nia. By requiring durable evidence, such orphaned memory
+ * files are eligible for re-capture.
+ *
+ * Cross-session dedup is still intentional: e.g., a PreCompact in session A and
+ * a SessionEnd in session B may extract the same decision.
  */
-async function readExistingFingerprints(cwd: string, sessionId: string): Promise<Set<string>> {
+async function readExistingFingerprints(cwd: string, _sessionId: string): Promise<Set<string>> {
   const fingerprints = new Set<string>();
   const dir = memoryDir(cwd);
+  const pDir = pendingDir(cwd);
 
   let files: string[];
   try {
@@ -255,20 +310,35 @@ async function readExistingFingerprints(cwd: string, sessionId: string): Promise
       const match = raw.match(/^---\n([\s\S]*?)\n---\n/);
       if (!match) continue;
 
-      // Quick check: does this file belong to the same session?
-      if (!raw.includes(sessionId)) continue;
-
       const frontmatter = YAML.parse(match[1]) as Record<string, unknown>;
-      if (frontmatter.session_id !== sessionId) continue;
-
-      // Only count fingerprints from successfully pushed drafts (those with context_ids)
-      const contextIds = frontmatter.context_ids as Record<string, string> | undefined;
       const fps = frontmatter.fingerprints as Record<string, string> | undefined;
       if (!fps || typeof fps !== "object") continue;
 
+      const contextIds =
+        typeof frontmatter.context_ids === "object" &&
+        frontmatter.context_ids !== null &&
+        !Array.isArray(frontmatter.context_ids)
+          ? (frontmatter.context_ids as Record<string, unknown>)
+          : {};
+
+      const captureId = typeof frontmatter.id === "string" ? frontmatter.id : undefined;
+      const safeId = captureId?.replace(/[^a-zA-Z0-9_.-]/g, "-");
+
       for (const [memoryType, fp] of Object.entries(fps)) {
-        if (contextIds && contextIds[memoryType]) {
+        // 1. Already pushed — context_id exists for this memory type
+        if (contextIds[memoryType]) {
           fingerprints.add(fp);
+          continue;
+        }
+
+        // 2. Queued to pending — pending file exists for this capture+type
+        if (safeId) {
+          try {
+            await stat(join(pDir, `${safeId}.${memoryType}.json`));
+            fingerprints.add(fp);
+          } catch {
+            // No pending file — fingerprint is NOT durably committed, skip it
+          }
         }
       }
     } catch {
