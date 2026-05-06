@@ -8,6 +8,7 @@ import { runInit } from "./init.js";
 import { runList } from "./list.js";
 import { runMcpCommand } from "./mcp.js";
 import { runReindex } from "./reindex.js";
+import { runStatus } from "./status.js";
 import { runUninstall } from "./uninstall.js";
 import { runView } from "./view.js";
 import type { Trigger } from "../types.js";
@@ -94,6 +95,9 @@ async function main(): Promise<void> {
     )
     .command("list", "List local memories", {}, async () => {
       await runList(process.cwd());
+    })
+    .command("status", "Show NCtx capture status for this project", {}, async () => {
+      await runStatus(process.cwd());
     })
     .command(
       "view <id>",
