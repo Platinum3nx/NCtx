@@ -208,6 +208,9 @@ export function normalizeMemoryTypeFromTags(result: unknown): unknown {
   return { ...result, memory_type: memoryType };
 }
 
+export const TEXT_OVERFETCH_FACTOR = 3;
+export const MIN_PROJECT_OVERFETCH = 15;
+
 export function buildTextSearchUrl(requestUrl: string, installTag: string, base = NIA_BASE): URL {
   const url = new URL(requestUrl);
   const upstreamUrl = new URL(`${base}/contexts/search`);
@@ -215,7 +218,17 @@ export function buildTextSearchUrl(requestUrl: string, installTag: string, base 
   const query = url.searchParams.get("q");
   if (query !== null) upstreamUrl.searchParams.set("q", query);
 
-  copyBoundedIntegerParam(url, upstreamUrl, "limit", 1, MAX_TEXT_LIMIT);
+  const projectTag = projectTagFromSearchParams(url.searchParams);
+  if (projectTag) {
+    // Overfetch when project filtering will be applied post-response
+    const rawLimit = url.searchParams.get("limit");
+    const requestedLimit = rawLimit && /^\d+$/.test(rawLimit) ? Number(rawLimit) : DEFAULT_SEMANTIC_LIMIT;
+    const overfetched = Math.min(MAX_TEXT_LIMIT, Math.max(MIN_PROJECT_OVERFETCH, requestedLimit * TEXT_OVERFETCH_FACTOR));
+    upstreamUrl.searchParams.set("limit", String(overfetched));
+  } else {
+    copyBoundedIntegerParam(url, upstreamUrl, "limit", 1, MAX_TEXT_LIMIT);
+  }
+
   copyBoundedIntegerParam(url, upstreamUrl, "offset", 0, MAX_TEXT_OFFSET);
 
   const includeHighlights = parseBooleanParam(url.searchParams.get("include_highlights"));

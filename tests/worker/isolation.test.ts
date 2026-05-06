@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AGENT_SOURCE,
+  MIN_PROJECT_OVERFETCH,
+  TEXT_OVERFETCH_FACTOR,
   bearerToken,
   buildSemanticSearchRequest,
   buildTextSearchUrl,
@@ -91,6 +93,33 @@ describe("Worker install isolation helpers", () => {
     expect(upstream.toString()).toBe(
       "https://apigcp.trynia.ai/v2/contexts/search?q=webhooks&limit=10&offset=5&include_highlights=true&tags=install%3Aserver"
     );
+  });
+
+  it("overfetches text search limit when project_name is present", () => {
+    const upstream = buildTextSearchUrl(
+      "https://worker.example/contexts/search?q=webhooks&limit=1&project_name=alpha",
+      "install:server"
+    );
+
+    expect(upstream.searchParams.get("limit")).toBe(String(MIN_PROJECT_OVERFETCH));
+  });
+
+  it("caps text search overfetch at MAX_TEXT_LIMIT (100)", () => {
+    const upstream = buildTextSearchUrl(
+      "https://worker.example/contexts/search?q=webhooks&limit=50&project_name=alpha",
+      "install:server"
+    );
+
+    expect(upstream.searchParams.get("limit")).toBe("100");
+  });
+
+  it("does not overfetch text search limit when no project scope is present", () => {
+    const upstream = buildTextSearchUrl(
+      "https://worker.example/contexts/search?q=webhooks&limit=10",
+      "install:server"
+    );
+
+    expect(upstream.searchParams.get("limit")).toBe("10");
   });
 
   it("over-fetches semantic search while preserving caller query options", () => {

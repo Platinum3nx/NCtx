@@ -201,13 +201,13 @@ async function forwardSemanticSearch(request: Request, env: Env, installTag: str
   const fallbackResults = await safeTextFallback(request, env, installTag, search.requestedLimit, search.projectTag);
   if (fallbackResults.length) {
     filtered.results = mergeSearchResults(searchResults(filtered), fallbackResults, search.requestedLimit);
-    if (isRecord(filtered.search_metadata)) {
-      filtered.search_metadata = {
-        ...filtered.search_metadata,
-        total_results: searchResults(filtered).length,
-        text_fallback_used: true
-      };
-    }
+    // Ensure search_metadata exists even if upstream didn't provide it
+    const existingMeta = isRecord(filtered.search_metadata) ? filtered.search_metadata : {};
+    filtered.search_metadata = {
+      ...existingMeta,
+      total_results: searchResults(filtered).length,
+      text_fallback_used: true
+    };
   }
 
   return json(filtered, upstream.status);
@@ -294,6 +294,14 @@ function authedRoute(method: string, pathname: string): AuthedRoute | null {
   return null;
 }
 
+/**
+ * Fetch wrapper for the Nia upstream with a timeout.
+ *
+ * On timeout, returns a JSON Response with status 504 and body
+ * `{ error: "Nia upstream timed out" }` rather than throwing.
+ * This is intentional because all callers check `!upstream.ok`
+ * before processing the response body.
+ */
 async function fetchNia(input: RequestInfo | URL, init: RequestInit): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), NIA_UPSTREAM_TIMEOUT_MS);
