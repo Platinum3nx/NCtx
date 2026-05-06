@@ -200,7 +200,7 @@ async function forwardSemanticSearch(request: Request, env: Env, installTag: str
 
     // Semantic returned fewer results than requested — supplement with text fallback
     const fallbackResults = await safeTextFallback(request, env, installTag, search.requestedLimit, search.projectTag);
-    if (fallbackResults.length) {
+    if (fallbackResults !== null && fallbackResults.length) {
       filtered.results = mergeSearchResults(searchResults(filtered), fallbackResults, search.requestedLimit);
       const existingMeta = isRecord(filtered.search_metadata) ? filtered.search_metadata : {};
       filtered.search_metadata = {
@@ -224,7 +224,8 @@ async function textFallbackOrError(
   semanticError: string
 ): Promise<Response> {
   const fallbackResults = await safeTextFallback(request, env, installTag, search.requestedLimit, search.projectTag);
-  if (fallbackResults.length) {
+  // Text fallback succeeded (even if empty) — return 200 with results
+  if (fallbackResults !== null) {
     return json({
       results: fallbackResults.slice(0, search.requestedLimit),
       search_metadata: {
@@ -234,7 +235,7 @@ async function textFallbackOrError(
       }
     });
   }
-  // Both semantic and text failed
+  // Both semantic and text actually failed
   return json({ error: "Upstream error", detail: semanticError }, 502);
 }
 
@@ -266,31 +267,35 @@ async function forwardTextSearch(request: Request, env: Env, installTag: string)
   );
 }
 
+/**
+ * Attempt text search as a fallback. Returns an array of results on success
+ * (possibly empty — that's a valid outcome), or null if the fallback itself failed.
+ */
 async function safeTextFallback(
   request: Request,
   env: Env,
   installTag: string,
   requestedLimit: number,
   projectTag: string | null
-): Promise<unknown[]> {
+): Promise<unknown[] | null> {
   try {
     const upstream = await fetchNia(buildTextSearchUrl(request.url, installTag), {
       headers: { Authorization: `Bearer ${env.NIA_API_KEY}` }
     });
-    if (!upstream.ok) return [];
+    if (!upstream.ok) return null;
 
     let body: unknown;
     try {
       body = await upstream.json();
     } catch {
-      return [];
+      return null;
     }
 
     const filtered = filterTextSearchResponse(body, installTag, requestedLimit, projectTag);
     return searchResults(filtered);
   } catch {
     // Any fallback failure (network, DNS, TLS, unexpected) should not crash the primary search path
-    return [];
+    return null;
   }
 }
 

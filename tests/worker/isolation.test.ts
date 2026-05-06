@@ -614,6 +614,37 @@ describe("Worker install isolation helpers", () => {
     });
   });
 
+  it("returns an empty result set when semantic fails and text fallback succeeds with no matches", async () => {
+    const { default: worker } = await import("../../worker/src/index.js");
+    const env = makeEnv();
+    const installToken = await registerInstall(worker, env);
+
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/contexts/semantic-search")) {
+        return new Response(JSON.stringify({ error: "Internal Server Error" }), { status: 500 });
+      }
+
+      return Response.json({ contexts: [] });
+    });
+
+    const response = await worker.fetch(
+      new Request("https://worker.example/contexts/semantic-search?q=none&limit=3&project_name=alpha", {
+        headers: { Authorization: `Bearer ${installToken}` }
+      }),
+      env
+    );
+    const body = (await response.json()) as any;
+
+    expect(response.status).toBe(200);
+    expect(body.results).toEqual([]);
+    expect(body.search_metadata).toMatchObject({
+      total_results: 0,
+      text_fallback_used: true,
+      semantic_error: "Semantic upstream error 500"
+    });
+  });
+
   it("does not crash the semantic search path when text fallback throws a network error", async () => {
     const { default: worker } = await import("../../worker/src/index.js");
     const env = makeEnv();
