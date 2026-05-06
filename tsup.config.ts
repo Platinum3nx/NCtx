@@ -10,5 +10,9 @@ export default defineConfig({
   splitting: false,
   sourcemap: true,
   clean: true,
-  dts: true
+  dts: true,
+  noExternal: [/.*/],
+  banner: {
+    js: `import { createRequire as __nctx_createRequire } from "node:module"; import { fileURLToPath as __nctx_fileURLToPath } from "node:url"; const require = __nctx_createRequire(__nctx_fileURLToPath(import.meta.url));`
+  }
 });

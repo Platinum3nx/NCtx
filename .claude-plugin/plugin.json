@@ -1,6 +1,6 @@
 {
   "name": "nctx",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Persistent Claude Code session memory powered by Nia Context Sharing.",
   "author": {
     "name": "platinum3nx"

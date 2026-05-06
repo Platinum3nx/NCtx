@@ -1,5 +1,5 @@
 export const PACKAGE_NAME = "@platinum3nx/nctx";
-export const PACKAGE_VERSION = "0.1.2";
+export const PACKAGE_VERSION = "0.1.3";
 
 export const NCTX_DIRNAME = ".nctx";
 export const CLAUDE_DIRNAME = ".claude";
