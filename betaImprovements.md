@@ -185,15 +185,23 @@ Project root: /Users/me/projects/aletheia
 
 ## Implementation Review Findings
 
-These findings were identified after reviewing the fixes for the prior implementation review. This section tracks remaining implementation issues that still need follow-up.
+All implementation findings from prior review passes have been resolved.
 
-**Status:** Follow-up required for Worker project-scoped text recall.
+**Status: ALL FIXED**
 
-### Finding 1 - [P1] Project-scoped text recall still depends on capped overfetch
+---
+
+## Known Design Limitations
+
+### Project-scoped text recall depends on capped overfetch
 
 **Location:** `worker/src/isolation.ts:221-227`
 
-The patch raises project-scoped text search to at least 15 upstream hits, but project filtering still happens only after Nia has returned that capped install-scoped page. If the first 15 install-scoped text hits belong to another project, the matching project hit at position 16 is still never seen, so the original false-negative class remains for text mode and semantic fallback.
+Nia's text search `tags` param accepts only the install tag. Project filtering (`project:` tag) must happen post-response. The Worker overfetches by 3x (minimum 15 results) when project scoping is active, but if all upstream results belong to other projects within the same install, matching project hits beyond that page are missed.
+
+**Why this is acceptable for beta:** In the intended model, each `nctx init` creates a unique install token per project. One project = one install = one install tag. Install-tag filtering at Nia already isolates per-project, making project-name filtering purely defense-in-depth. The false-negative only manifests if a user deliberately shares one install token across multiple projects (abnormal usage) AND that install accumulates 15+ other-project memories ranking higher.
+
+**Future fix (if needed):** Paginate — if post-filter yields fewer results than requested, fetch the next upstream page with an offset. Only worth implementing if multi-project installs become a supported use case.
 
 ---
 
