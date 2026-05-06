@@ -116,14 +116,18 @@ function formatSearchError(response: Response, body: unknown): string {
 }
 
 function errorDetail(body: unknown): string | null {
-  if (typeof body === "string") return body.slice(0, 500);
+  if (typeof body === "string") return sanitizeErrorDetail(body);
   if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
 
   const record = body as Record<string, unknown>;
   for (const key of ["error", "message", "detail"]) {
     const value = record[key];
-    if (typeof value === "string" && value.trim() !== "") return value;
+    if (typeof value === "string" && value.trim() !== "") return sanitizeErrorDetail(value);
   }
 
   return null;
+}
+
+function sanitizeErrorDetail(value: string): string {
+  return value.replace(/[\n\r\u0000-\u001f\u007f]/g, " ").trim().slice(0, 200);
 }

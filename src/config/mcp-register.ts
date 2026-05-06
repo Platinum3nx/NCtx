@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -135,17 +135,52 @@ async function getPluginMcpStatus(pluginRoot: string): Promise<McpStatus> {
     const hasMcpArg = args.some((arg) => arg === "mcp");
     const command = typeof server.command === "string" ? server.command : "";
     const configured = command.length > 0 && hasMcpArg;
+
+    if (!configured) {
+      return {
+        registered: false,
+        toolRegistered: false,
+        source: "none",
+        details: `Plugin MCP config at ${configPath} does not run the ${MCP_NAME} MCP command`
+      };
+    }
+
+    // Verify the CLI entry point exists on disk
+    const cliPath = resolvePluginCliPath(pluginRoot, args);
+    if (cliPath) {
+      try {
+        await access(cliPath);
+      } catch {
+        return {
+          registered: true,
+          toolRegistered: false,
+          source: "plugin",
+          details: `Plugin MCP configured but CLI entry point not found: ${cliPath}`
+        };
+      }
+    }
+
     return {
-      registered: configured,
-      toolRegistered: configured,
-      source: configured ? "plugin" : "none",
-      details: configured
-        ? `Plugin MCP config provides ${MCP_NAME} from ${configPath}`
-        : `Plugin MCP config at ${configPath} does not run the ${MCP_NAME} MCP command`
+      registered: true,
+      toolRegistered: true,
+      source: "plugin",
+      details: `Plugin MCP config provides ${MCP_NAME} from ${configPath}`
     };
   } catch (error) {
     return missingPluginMcp(error instanceof Error ? error.message : String(error));
   }
+}
+
+function resolvePluginCliPath(pluginRoot: string, args: unknown[]): string | null {
+  // Find the first arg that looks like a JS file path
+  for (const arg of args) {
+    if (typeof arg !== "string") continue;
+    const resolved = arg.replace(/\$\{CLAUDE_PLUGIN_ROOT\}/g, pluginRoot);
+    if (resolved.endsWith(".js") || resolved.endsWith(".mjs") || resolved.endsWith(".cjs")) {
+      return resolved;
+    }
+  }
+  return null;
 }
 
 function missingPluginMcp(details: string): McpStatus {

@@ -104,9 +104,9 @@ function formatOne(result: McpSearchResult, index: number): string {
     `# ${index}. NCtx Memory`,
     untrustedBlock("Title", result.title),
     result.summary ? untrustedBlock("Summary", result.summary) : "",
-    result.memory_type ? `Memory type: ${result.memory_type}` : "",
-    result.created_at ? `Date: ${result.created_at}` : "",
-    result.score != null ? `Score: ${result.score.toFixed(3)}` : "",
+    result.memory_type ? `Memory type: ${sanitizeMeta(result.memory_type)}` : "",
+    result.created_at ? `Date: ${sanitizeMeta(result.created_at)}` : "",
+    result.score != null ? `Score: ${sanitizeMeta(result.score.toFixed(3))}` : "",
     visible.length ? `Tags: ${visible.join(", ")}` : "",
     result.file_paths.length ? untrustedBlock("Files", result.file_paths.map(sanitizeFilePath).join(", ")) : "",
     result.highlights.length
@@ -125,8 +125,8 @@ function formatOne(result: McpSearchResult, index: number): string {
 
 function formatOneCompact(result: McpSearchResult, index: number): string {
   const meta: string[] = [];
-  if (result.memory_type) meta.push(result.memory_type);
-  if (result.created_at) meta.push(result.created_at);
+  if (result.memory_type) meta.push(sanitizeMeta(result.memory_type));
+  if (result.created_at) meta.push(sanitizeMeta(result.created_at));
 
   const lines = [
     `# ${index}. NCtx Memory`,
@@ -180,6 +180,10 @@ function visibleTags(tags: string[]): string[] {
 
 function sanitizeFilePath(path: string): string {
   return path.replace(/[\n\r\u0000-\u001f\u007f]/g, "").trim();
+}
+
+function sanitizeMeta(value: string): string {
+  return value.replace(/[\n\r\u0000-\u001f\u007f]/g, "").trim().slice(0, 100);
 }
 
 function trimContent(content: string): string {

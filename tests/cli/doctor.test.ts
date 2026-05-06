@@ -122,7 +122,9 @@ describe("doctor MCP checks", () => {
   it("accepts plugin-supplied MCP config without requiring local Claude MCP registration", async () => {
     const root = await tempRoot();
     const pluginRoot = path.join(root, "plugin");
-    await mkdir(pluginRoot, { recursive: true });
+    const cliDir = path.join(pluginRoot, "dist", "cli");
+    await mkdir(cliDir, { recursive: true });
+    await writeFile(path.join(cliDir, "index.js"), "// stub", "utf8");
     await writeFile(
       path.join(pluginRoot, ".mcp.json"),
       JSON.stringify({
@@ -148,5 +150,38 @@ describe("doctor MCP checks", () => {
       toolRegistered: true,
       source: "plugin"
     });
+  });
+
+  it("reports toolRegistered false when plugin MCP config points to a missing CLI entry point", async () => {
+    const root = await tempRoot();
+    const pluginRoot = path.join(root, "plugin");
+    await mkdir(pluginRoot, { recursive: true });
+    // Write .mcp.json but do NOT create the dist/cli/index.js file
+    await writeFile(
+      path.join(pluginRoot, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          nctx: {
+            command: "node",
+            args: ["${CLAUDE_PLUGIN_ROOT}/dist/cli/index.js", "mcp"]
+          }
+        }
+      }),
+      "utf8"
+    );
+
+    const status = await getMcpStatus(root, {
+      pluginRoot,
+      execFile: async () => {
+        throw new Error("claude mcp list should not be needed in plugin mode");
+      }
+    });
+
+    expect(status).toMatchObject({
+      registered: true,
+      toolRegistered: false,
+      source: "plugin"
+    });
+    expect(status.details).toContain("CLI entry point not found");
   });
 });
