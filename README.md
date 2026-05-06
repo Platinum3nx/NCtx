@@ -34,7 +34,8 @@ Implemented:
 Launch readiness notes as of May 6, 2026:
 
 - `@platinum3nx/nctx@0.1.3` is published on npm and matches the marketplace manifest.
-- Complete Worker deployment and fresh-install smoke tests before public launch posting.
+- The hosted Worker is deployed at `https://nctx.amalghan70.workers.dev`.
+- Fresh install, project init, detached `SessionEnd` capture, hosted save, and MCP recall smoke tests have passed.
 
 ## Hosted Beta Model
 
@@ -42,7 +43,7 @@ The beta is hosted-only. Users do not need a Nia account or Nia key.
 
 Flow:
 
-1. `nctx init` registers an install with the NCtx Worker.
+1. Project init (`nctx init --plugin` for plugin users, or `nctx init` for standalone CLI users) registers an install with the NCtx Worker.
 2. The Worker mints a high-entropy `install_token` and a server-side `install_id`.
 3. The CLI stores only `install_token` in `.nctx/config.json`.
 4. Saves/searches go through the Worker with `Authorization: Bearer <install_token>`.
@@ -51,6 +52,58 @@ Flow:
 The Worker stores no user content. It stores only token-hash to install-id mappings in KV and request counters in Durable Objects.
 
 If an `install_token` leaks, only that one install's memories are exposed. Other installs and the enterprise Nia account remain isolated.
+
+## Quick Start
+
+Prerequisites:
+
+- Claude Code with plugin support.
+- Node.js `>=20.18.0` for `npx`.
+
+No Nia account, Nia API key, Cloudflare account, or package secret is required for the hosted beta.
+
+Install the Claude Code plugin once per machine/user:
+
+```bash
+claude plugin marketplace add Platinum3nx/NCtx
+claude plugin install nctx@nctx-marketplace
+```
+
+Initialize NCtx once per project:
+
+```bash
+cd /path/to/your/project
+npx -y @platinum3nx/nctx@0.1.3 init --plugin
+```
+
+The plugin install does not need to put a global `nctx` command on your shell `PATH`; the `npx` command above is the intended project init path.
+
+Then use Claude Code normally:
+
+```bash
+claude
+```
+
+NCtx runs automatically through the plugin hooks and `nctx_memory` MCP server. It captures durable project memory on `PreCompact` and `SessionEnd`, stores it through the hosted Worker/Nia path, and makes it available to future Claude Code sessions through the `nctx_memory` tool.
+
+Verify the installed plugin version:
+
+```bash
+claude plugin list
+```
+
+You should see `nctx@nctx-marketplace` at version `0.1.3`.
+
+If you previously installed `0.1.2` and Claude Code keeps reusing a stale cache:
+
+```bash
+claude plugin uninstall nctx@nctx-marketplace
+rm -rf ~/.claude/plugins/npm-cache/node_modules/@platinum3nx/nctx
+rm -rf ~/.claude/plugins/cache/nctx-marketplace/nctx/0.1.2
+claude plugin marketplace update nctx-marketplace
+claude plugin install nctx@nctx-marketplace
+claude plugin list
+```
 
 ## Install From This Repo
 
@@ -61,28 +114,20 @@ npm install
 npm run build
 ```
 
-## Install As A Claude Code Plugin
+## Claude Code Plugin Details
 
-For most users:
+The public marketplace manifest lives in `.claude-plugin/marketplace.json`. The plugin itself is distributed through npm as `@platinum3nx/nctx`.
+
+To refresh the marketplace later:
 
 ```bash
-claude plugin marketplace add Platinum3nx/NCtx
-claude plugin install nctx@nctx-marketplace
+claude plugin marketplace update nctx-marketplace
 ```
-
-This installs the plugin from the public marketplace manifest in this GitHub repo. The plugin itself is distributed through npm as `@platinum3nx/nctx`.
 
 Verify npm publication with:
 
 ```bash
 npm view @platinum3nx/nctx versions --json
-```
-
-For direct CLI use from npm:
-
-```bash
-npm install -g @platinum3nx/nctx@0.1.3
-nctx init
 ```
 
 For local plugin development from this checkout:
@@ -91,21 +136,43 @@ For local plugin development from this checkout:
 claude plugin validate .
 ```
 
-Once the plugin is installed in a project, initialize NCtx project state:
+## Direct CLI Use
+
+The plugin flow above is recommended. If you want a global `nctx` command for standalone CLI use:
 
 ```bash
-/nctx
+npm install -g @platinum3nx/nctx@0.1.3
+nctx init
 ```
 
-or run the plugin CLI directly:
+If you do not install globally, prefix commands with `npx`. For plugin-mode project init:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/dist/cli/index.js" init --plugin
+npx -y @platinum3nx/nctx@0.1.3 init --plugin
 ```
 
-Plugin mode writes `.nctx/config.json` only. Hooks and MCP are supplied by the plugin package.
+For standalone project init without the Claude Code plugin:
 
-Initialize a project against the deployed beta Worker:
+```bash
+npx -y @platinum3nx/nctx@0.1.3 init
+```
+
+`nctx init --plugin` writes `.nctx/config.json` only. Hooks and MCP are supplied by the Claude Code plugin package. Plain `nctx init` is for standalone CLI mode and writes project `.claude/settings.json` hooks plus MCP registration.
+
+## Self-Hosted / Development Init
+
+Normal beta users do not need a package secret. The hosted Worker accepts the public beta client secret bundled in `0.1.3`.
+
+For development against a custom Worker:
+
+```bash
+cd /path/to/your/project
+npx -y @platinum3nx/nctx@0.1.3 init \
+  --proxy-url https://your-worker.example \
+  --package-secret "$PACKAGE_SHARED_SECRET"
+```
+
+For local development from this checkout:
 
 ```bash
 cd /path/to/your/project
@@ -114,7 +181,7 @@ node /path/to/NCtx/dist/cli/index.js init \
   --package-secret "$PACKAGE_SHARED_SECRET"
 ```
 
-For local development, load secrets first:
+If you keep development secrets locally, load them first:
 
 ```bash
 set -a
@@ -130,7 +197,32 @@ node /path/to/NCtx/dist/cli/index.js init \
   --package-secret "$PACKAGE_SHARED_SECRET"
 ```
 
+## Smoke Test
+
+After installing and initializing in a project:
+
+```bash
+claude
+```
+
+Ask Claude Code to make a concrete project decision or edit, then exit with `/exit`. Wait a few seconds, then run:
+
+```bash
+find .nctx -maxdepth 3 -type f
+npx -y @platinum3nx/nctx@0.1.3 status
+```
+
+Expected signs of life:
+
+- `.nctx/config.json` exists.
+- `.nctx/sessions/<session-id>.pos` exists after `/exit`.
+- Higher-signal sessions produce `.nctx/memories/*.md` and pushed context counts.
+
+Low-signal sessions may only advance the cursor and skip memory creation; that is expected.
+
 ## What `init` Writes
+
+Plugin mode (`nctx init --plugin`) creates `.nctx/config.json` and the working directories NCtx uses under `.nctx/`:
 
 ```text
 .nctx/
@@ -139,9 +231,12 @@ node /path/to/NCtx/dist/cli/index.js init \
   pending/
   spool/
   sessions/
-  errors.log
-.claude/settings.json
+  errors.log   # created only when errors are logged
 ```
+
+Standalone mode (`nctx init`) also writes Claude Code hook configuration and MCP registration for the project. In plugin mode, hooks and MCP are provided by the installed Claude Code plugin, so `.claude/settings.json` is not required.
+
+Both modes add `.nctx/` to `.gitignore` when it is not already ignored.
 
 `.nctx/config.json` stores:
 
@@ -159,10 +254,12 @@ node /path/to/NCtx/dist/cli/index.js init \
 
 ## Commands
 
+The examples below assume a global install. Without one, replace `nctx` with `npx -y @platinum3nx/nctx@0.1.3`.
+
 ```bash
-nctx init       # initialize hooks, config, and MCP registration
+nctx init       # standalone: initialize config, hooks, and MCP registration
 nctx init --rotate-token # mint a fresh install token instead of reusing config
-nctx init --plugin # initialize config only when installed as a Claude Code plugin
+nctx init --plugin # plugin mode: initialize project config only
 nctx capture    # run from Claude Code hook JSON on stdin
 nctx capture --trigger=session-end --detach # fast SessionEnd handoff used by hooks
 nctx capture --from-spool <path> # internal detached capture worker entrypoint
