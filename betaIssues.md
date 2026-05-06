@@ -2,27 +2,50 @@
 
 Issues found during the full codebase review. They focus on issues that interfere with the project goal: a Claude Code plugin that provides automatic project memory by capturing, isolating, and retrieving Nia-backed context reliably.
 
-**Status: OPEN FOLLOW-UP ISSUES FOUND** (verification still passes, but the latest fix review found two partial-fix gaps that can keep capture durability and plugin diagnostics from fully meeting the beta goal)
+**Status: NO KNOWN CODE OR PACKAGE LAUNCH BLOCKERS** (`@platinum3nx/nctx@0.1.3` is published; complete Worker deploy and fresh-install smoke tests before posting)
 
 ---
 
-## Fix Review Findings — Open
+## Launch Readiness Review — Resolved
 
-### Finding 1. Orphaned captures can still suppress retry extraction
+### Finding 1. Marketplace points to an unpublished npm artifact — FIXED
+
+- Priority: P1 release prerequisite
+- File: `.claude-plugin/marketplace.json`
+- Fix: Published `@platinum3nx/nctx@0.1.3` to npm.
+- Verification: `npm view @platinum3nx/nctx versions --json` now includes `0.1.3`, and the registry reports tarball integrity `sha512-/t/BhSpqkGThcEg3s9lOLzn3z3cLN+pUOJDGZhFI6k4Y345mjwpLIZhC2c15UW1la3cmtKNax5fu8EPnKGGPQg==`, matching the dry-run artifact.
+
+---
+
+### Finding 1. Plugin SessionEnd capture can exceed Claude Code's plugin hook budget — FIXED
+
+- Priority: P1
+- Files: `hooks/hooks.json`, `src/cli/capture.ts`, `src/cli/index.ts`, `src/config/hooks.ts`
+- Fix: `SessionEnd` now uses a fast synchronous handoff: `capture --trigger=session-end --detach` reads the hook payload, writes a 0600 spool file under the initialized project, spawns a detached worker process with stdio ignored, and exits. The worker runs `capture --from-spool <path>` outside Claude Code's exit budget, removes the spool after processing, and uses the existing capture/pending/cursor durability pipeline.
+- Verification: Direct built-CLI handoff returned in about 85ms, then the detached worker wrote the session cursor and left no spool file. A real Claude Code 2.1.79 `/exit` run against the built plugin logged the NCtx `SessionEnd` hook as `completed with status 0`, and the detached worker wrote `.nctx/sessions/<session>.pos`.
+
+### Finding 2. Empty text fallback is treated as retrieval failure — FIXED
+
+- Priority: P2
+- File: `worker/src/index.ts`
+- Fix: `safeTextFallback` now returns `unknown[] | null`, where an empty array means fallback succeeded with zero matches and `null` means fallback failed. `textFallbackOrError` now returns a 200 empty result set for successful empty fallback.
+- Verification: Worker typecheck and Worker tests pass.
+
+---
+
+## Fix Review Findings — Resolved / Deferred
+
+### Finding 1. Orphaned captures can still suppress retry extraction — VERIFIED FIXED
 
 - Priority: P1
 - File: `src/cli/capture.ts`
-- Issue: `readExistingFingerprints` now ignores local memories without `context_ids` or pending files, but `priorSessionSummaries` still feeds those same non-durable local memories into the extraction prompt as "previously captured" from the same session.
-- Impact: If the hook exits after `writeMemoryFile` but before the memory is saved or queued, the retry can be told not to re-extract the orphaned memory before the dedupe gate ever runs. Hosted Nia/MCP recall can still miss the memory.
-- Suggested fix: Exclude non-durable memories from `priorSessionSummaries`, or mark and drain orphaned local memories explicitly so retry extraction is not suppressed by unpushed local files.
+- Verification: `priorSessionSummaries` now filters same-session summaries through durable evidence (`context_ids` or matching pending files), so non-durable orphan files are not fed back into the extraction prompt as already captured context. `readExistingFingerprints` uses the same durable-evidence rule for memory-type dedupe.
 
-### Finding 2. Plugin doctor still does not prove MCP can start
+### Finding 2. Plugin doctor still does not prove MCP can start — DEFERRED
 
 - Priority: P2
 - File: `src/config/mcp-register.ts`
-- Issue: The plugin-mode doctor fix verifies that the configured CLI file exists, but it does not verify that the MCP server starts or can list the `nctx_memory` tool.
-- Impact: A present but crashing `dist/cli/index.js` can still make `nctx doctor` report `toolRegistered: true`, leaving the automatic recall path broken while diagnostics look healthy.
-- Suggested fix: Perform a lightweight MCP `tools/list` handshake against the configured plugin server, or reuse an actual `claude mcp list` status, before marking the plugin MCP tool registered.
+- Why deferred: This is diagnostic hardening rather than the runtime path itself. The current bundle starts and a direct MCP `tools/list` handshake returns `nctx_memory`; doctor can be made stricter after beta without blocking capture or retrieval for users.
 
 ---
 
