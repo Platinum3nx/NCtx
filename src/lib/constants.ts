@@ -1,11 +1,12 @@
 export const PACKAGE_NAME = "@platinum3nx/nctx";
-export const PACKAGE_VERSION = "0.1.3";
+export const PACKAGE_VERSION = "0.1.4";
 
 export const NCTX_DIRNAME = ".nctx";
 export const CLAUDE_DIRNAME = ".claude";
 export const CLAUDE_SETTINGS_FILENAME = "settings.json";
 
 export const DEFAULT_PROXY_URL = "https://nctx.amalghan70.workers.dev";
+export const DEFAULT_NIA_BASE_URL = "https://apigcp.trynia.ai/v2";
 export const PACKAGE_SHARED_SECRET = "nctx-public-beta-client-v1";
 export const AGENT_SOURCE = "nctx-claude-code";
 
