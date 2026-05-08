@@ -1,5 +1,6 @@
 import { normalizeSearchResultsResponse, type McpSearchResult } from "./format.js";
 import type { NctxMcpConfig } from "./config.js";
+import { AGENT_SOURCE } from "../lib/constants.js";
 
 export type MemorySearchMode = "semantic" | "text";
 
@@ -11,10 +12,10 @@ type FetchLike = typeof fetch;
 const DEFAULT_SEARCH_TIMEOUT_MS = 15_000;
 
 export function makeClient(config: NctxMcpConfig, fetchImpl: FetchLike = fetch): NctxMemoryClient {
-  return new HostedNctxMemoryClient(config, fetchImpl);
+  return new DirectNctxMemoryClient(config, fetchImpl);
 }
 
-class HostedNctxMemoryClient implements NctxMemoryClient {
+class DirectNctxMemoryClient implements NctxMemoryClient {
   constructor(
     private readonly config: NctxMcpConfig,
     private readonly fetchImpl: FetchLike,
@@ -31,7 +32,7 @@ class HostedNctxMemoryClient implements NctxMemoryClient {
       {
         headers: {
           Accept: "application/json",
-          Authorization: `Bearer ${this.config.install_token}`
+          Authorization: `Bearer ${this.config.nia_api_key}`
         }
       },
       this.timeoutMs
@@ -42,26 +43,28 @@ class HostedNctxMemoryClient implements NctxMemoryClient {
       throw new Error(formatSearchError(response, body));
     }
 
-    return normalizeSearchResultsResponse(body).slice(0, normalizedLimit);
+    const projectTag = projectTagFor(this.config.project_name);
+    return normalizeSearchResultsResponse(body)
+      .filter((result) => result.agent_source === AGENT_SOURCE && result.tags.includes(projectTag))
+      .slice(0, normalizedLimit);
   }
 
   private searchUrl(query: string, limit: number, mode: MemorySearchMode): URL {
     const path = mode === "semantic" ? "/contexts/semantic-search" : "/contexts/search";
-    const url = proxyEndpointUrl(this.config.proxy_url, path);
+    const url = serviceEndpointUrl(this.config.nia_base_url, path);
     url.searchParams.set("q", query);
     url.searchParams.set("limit", String(limit));
-    if (this.config.project_name?.trim()) {
-      url.searchParams.set("project_name", this.config.project_name.trim());
-    }
     if (mode === "semantic") {
       url.searchParams.set("include_highlights", "true");
+    } else {
+      url.searchParams.set("tags", projectTagFor(this.config.project_name));
     }
     return url;
   }
 }
 
-function proxyEndpointUrl(proxyUrl: string, endpointPath: string): URL {
-  const url = new URL(proxyUrl);
+function serviceEndpointUrl(baseUrl: string, endpointPath: string): URL {
+  const url = new URL(baseUrl);
   const basePath = url.pathname === "/" ? "" : url.pathname.replace(/\/+$/, "");
   url.pathname = `${basePath}${endpointPath}`;
   url.search = "";
@@ -130,4 +133,11 @@ function errorDetail(body: unknown): string | null {
 
 function sanitizeErrorDetail(value: string): string {
   return value.replace(/[\n\r\u0000-\u001f\u007f]/g, " ").trim().slice(0, 200);
+}
+
+function projectTagFor(projectNameOrTag: string): string {
+  const trimmed = projectNameOrTag.trim();
+  const rawProject = trimmed.toLowerCase().startsWith("project:") ? trimmed.slice("project:".length) : trimmed;
+  const normalized = rawProject.trim().toLowerCase().replace(/\s+/g, "-");
+  return `project:${normalized || "project"}`;
 }

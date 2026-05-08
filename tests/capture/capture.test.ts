@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createHostedConfig, saveConfig } from "../../src/config/load.js";
+import { createDirectConfig, saveConfig } from "../../src/config/load.js";
 import { memoryDir, sessionsDir, spoolDir } from "../../src/lib/fs.js";
 import type { ExtractionResult } from "../../src/types.js";
 
@@ -18,7 +18,7 @@ vi.mock("../../src/capture/extract.js", () => ({
   extractMemory: mocks.extractMemory
 }));
 
-vi.mock("../../src/nia/hosted.js", () => ({
+vi.mock("../../src/nia/client.js", () => ({
   makeClient: mocks.makeClient
 }));
 
@@ -72,9 +72,8 @@ describe("runCapture", () => {
     await mkdir(nested, { recursive: true });
     await saveConfig(
       root,
-      createHostedConfig({
-        installToken: "nctx_it_hosted_install_token_long_enough",
-        proxyUrl: "https://worker.example",
+      createDirectConfig({
+        niaApiKey: "nia_test_user_key_that_is_long_enough",
         projectName: "demo",
         projectRoot: root
       })
@@ -128,9 +127,8 @@ describe("runCapture", () => {
     const root = await tempRoot();
     await saveConfig(
       root,
-      createHostedConfig({
-        installToken: "nctx_it_hosted_install_token_long_enough",
-        proxyUrl: "https://worker.example",
+      createDirectConfig({
+        niaApiKey: "nia_test_user_key_that_is_long_enough",
         projectName: "demo",
         projectRoot: root
       })

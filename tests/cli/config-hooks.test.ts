@@ -4,7 +4,6 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   configPath,
-  createHostedConfig,
   loadConfig,
   saveConfig,
   validateConfig
@@ -24,34 +23,66 @@ afterEach(async () => {
 });
 
 describe("config load/save", () => {
-  it("writes hosted config without trusted server secrets", async () => {
-    const root = await tempRoot();
-    const config = createHostedConfig({
-      installToken: "nctx_it_test_token_that_is_long_enough",
-      proxyUrl: "http://127.0.0.1:8787/",
-      projectRoot: root
+  it("accepts direct BYOK configs without hosted Worker credentials", () => {
+    const result = validateConfig({
+      mode: "direct",
+      nia_api_key: "nia_test_user_key_that_is_long_enough",
+      nia_base_url: "https://apigcp.trynia.ai/v2",
+      project_name: "demo",
+      version: "0.2.0"
     });
+
+    expect(result).toMatchObject({ ok: true, errors: [] });
+  });
+
+  it("rejects direct configs that keep hosted Worker credentials", () => {
+    const result = validateConfig({
+      mode: "direct",
+      nia_api_key: "nia_test_user_key_that_is_long_enough",
+      install_token: "nctx_it_old_hosted_token_that_is_long_enough",
+      proxy_url: "https://worker.example",
+      project_name: "demo",
+      version: "0.2.0"
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.errors.join(" ")).toContain("install_token");
+    expect(result.errors.join(" ")).toContain("proxy_url");
+  });
+
+  it("writes direct config without hosted Worker credentials", async () => {
+    const root = await tempRoot();
+    const config = {
+      mode: "direct",
+      nia_api_key: "nia_test_user_key_that_is_long_enough",
+      nia_base_url: "https://apigcp.trynia.ai/v2",
+      project_name: "demo",
+      version: "0.2.0"
+    } as any;
 
     await saveConfig(root, config);
 
     const raw = await readFile(configPath(root), "utf8");
     expect(raw).not.toContain("shared_secret");
     expect(raw).not.toContain("install_id");
-    expect(raw).not.toContain("nia_api_key");
+    expect(raw).not.toContain("install_token");
+    expect(raw).not.toContain("proxy_url");
     await expect(loadConfig(root)).resolves.toMatchObject({
-      mode: "hosted",
-      install_token: "nctx_it_test_token_that_is_long_enough",
-      proxy_url: "http://127.0.0.1:8787"
+      mode: "direct",
+      nia_api_key: "nia_test_user_key_that_is_long_enough",
+      nia_base_url: "https://apigcp.trynia.ai/v2"
     });
   });
 
   it("writes config owner-only even when replacing a broader existing file", async () => {
     const root = await tempRoot();
-    const config = createHostedConfig({
-      installToken: "nctx_it_test_token_that_is_long_enough",
-      proxyUrl: "https://example.com",
-      projectRoot: root
-    });
+    const config = {
+      mode: "direct",
+      nia_api_key: "nia_test_user_key_that_is_long_enough",
+      nia_base_url: "https://apigcp.trynia.ai/v2",
+      project_name: "demo",
+      version: "0.2.0"
+    } as any;
     await saveConfig(root, config);
     await chmod(configPath(root), 0o644);
 
@@ -60,7 +91,7 @@ describe("config load/save", () => {
     expect((await stat(configPath(root))).mode & 0o777).toBe(0o600);
   });
 
-  it("rejects hosted configs that leak install id or Nia keys", () => {
+  it("rejects hosted configs for normal BYOK installs", () => {
     const result = validateConfig({
       mode: "hosted",
       install_token: "nctx_it_test_token_that_is_long_enough",
@@ -72,8 +103,7 @@ describe("config load/save", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.errors.join(" ")).toContain("install_id");
-    expect(result.errors.join(" ")).toContain("nia_api_key");
+    expect(result.errors.join(" ")).toContain("hosted config is no longer supported");
   });
 });
 

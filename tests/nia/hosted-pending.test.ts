@@ -303,15 +303,7 @@ describe("pending queue", () => {
   it("reindexes local memory files and backfills per-memory-type context ids", async () => {
     const root = await tempRoot();
     const nested = path.join(root, "packages", "app");
-    await saveConfig(
-      root,
-      createHostedConfig({
-        installToken: "nctx_it_hosted_install_token_long_enough",
-        proxyUrl: "https://worker.example",
-        projectName: "demo",
-        projectRoot: root
-      })
-    );
+    await saveConfig(root, directConfig(root, "demo") as any);
 
     await mkdir(nested, { recursive: true });
     await mkdir(memoryDir(root), { recursive: true });
@@ -371,15 +363,7 @@ describe("pending queue", () => {
 
   it("backfills memory frontmatter when reindex drains queued pending contexts", async () => {
     const root = await tempRoot();
-    await saveConfig(
-      root,
-      createHostedConfig({
-        installToken: "nctx_it_hosted_install_token_long_enough",
-        proxyUrl: "https://worker.example",
-        projectName: "demo",
-        projectRoot: root
-      })
-    );
+    await saveConfig(root, directConfig(root, "demo") as any);
     await mkdir(memoryDir(root), { recursive: true });
     const memoryPath = path.join(memoryDir(root), "capture-pending.md");
     await writeFile(
@@ -434,15 +418,7 @@ describe("pending queue", () => {
 
   it("backfills successful reindex saves and queues failed memory types", async () => {
     const root = await tempRoot();
-    await saveConfig(
-      root,
-      createHostedConfig({
-        installToken: "nctx_it_hosted_install_token_long_enough",
-        proxyUrl: "https://worker.example",
-        projectName: "demo",
-        projectRoot: root
-      })
-    );
+    await saveConfig(root, directConfig(root, "demo") as any);
     await mkdir(memoryDir(root), { recursive: true });
     const memoryPath = path.join(memoryDir(root), "capture-partial.md");
     await writeFile(
@@ -513,4 +489,14 @@ describe("pending queue", () => {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function directConfig(root: string, projectName: string): Record<string, unknown> {
+  return {
+    mode: "direct",
+    nia_api_key: "nia_test_user_key_that_is_long_enough",
+    nia_base_url: "https://apigcp.trynia.ai/v2",
+    project_name: projectName,
+    version: "0.2.0"
+  };
 }

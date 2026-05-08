@@ -6,7 +6,7 @@ import { backfillMemoryContextIds } from "../capture/render.js";
 import { findProjectRoot, loadConfig } from "../config/load.js";
 import { memoryDir } from "../lib/fs.js";
 import { drainPendingContexts, listPendingContexts, queuePending, removePendingContext } from "../lib/pending.js";
-import { makeClient } from "../nia/hosted.js";
+import { makeClient } from "../nia/client.js";
 
 const AGENT_SOURCE = "nctx-claude-code";
 

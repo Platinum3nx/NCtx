@@ -30,11 +30,11 @@ describe("MCP server tool handler", () => {
     await writeFile(
       configPath,
       JSON.stringify({
-        mode: "hosted",
-        install_token: "nctx_it_server_token",
-        proxy_url: "https://worker.example",
+        mode: "direct",
+        nia_api_key: "nia_test_user_key_that_is_long_enough",
+        nia_base_url: "https://apigcp.trynia.ai/v2",
         project_name: "demo",
-        version: "0.1.0"
+        version: "0.2.0"
       }),
       "utf8"
     );
@@ -52,6 +52,8 @@ describe("MCP server tool handler", () => {
               {
                 title: "Remembered decision",
                 summary: "A useful project memory",
+                tags: ["project:demo"],
+                agent_source: "nctx-claude-code",
                 relevance_score: 0.95,
                 match_highlights: ["Use the MCP-specific client."]
               }
@@ -66,7 +68,7 @@ describe("MCP server tool handler", () => {
     expect(loadedConfigs).toHaveLength(1);
     expect(loadedConfigs[0].config_path).toBe(configPath);
     expect(requests[0].url).toBe(
-      "https://worker.example/contexts/semantic-search?q=server+wiring&limit=3&project_name=demo&include_highlights=true"
+      "https://apigcp.trynia.ai/v2/contexts/semantic-search?q=server+wiring&limit=3&include_highlights=true"
     );
     expect(textOf(result)).toContain("Remembered decision");
     expect(textOf(result)).toContain("1. Use the MCP-specific client.");
@@ -75,11 +77,11 @@ describe("MCP server tool handler", () => {
 
   it("returns config, argument, and search failures as tool errors", async () => {
     const config: NctxMcpConfig = {
-      mode: "hosted",
-      install_token: "nctx_it_test_token",
-      proxy_url: "https://worker.example",
+      mode: "direct",
+      nia_api_key: "nia_test_user_key_that_is_long_enough",
+      nia_base_url: "https://apigcp.trynia.ai/v2",
       project_name: "demo",
-      version: "0.1.0",
+      version: "0.2.0",
       config_path: "/tmp/demo/.nctx/config.json"
     };
 
@@ -87,7 +89,7 @@ describe("MCP server tool handler", () => {
       loadConfig: () => config,
       makeClient: () => ({
         async searchContexts() {
-          throw new Error("NCtx memory search failed (401 Unauthorized): Invalid install token");
+          throw new Error("NCtx memory search failed (401 Unauthorized): Invalid API key");
         }
       }),
       readConfigMtimeMs: () => 1
@@ -97,12 +99,12 @@ describe("MCP server tool handler", () => {
       isError: true,
       content: [{ type: "text", text: "nctx_memory requires a query." }]
     });
-    await expect(searchFailure(toolRequest({ query: "token issue" }))).resolves.toMatchObject({
+    await expect(searchFailure(toolRequest({ query: "key issue" }))).resolves.toMatchObject({
       isError: true,
       content: [
         {
           type: "text",
-          text: "NCtx memory search failed (401 Unauthorized): Invalid install token"
+          text: "NCtx memory search failed (401 Unauthorized): Invalid API key"
         }
       ]
     });
@@ -120,11 +122,11 @@ describe("MCP server tool handler", () => {
 
   it("caches the MCP client until cwd or config mtime changes", async () => {
     const config: NctxMcpConfig = {
-      mode: "hosted",
-      install_token: "nctx_it_test_token",
-      proxy_url: "https://worker.example",
+      mode: "direct",
+      nia_api_key: "nia_test_user_key_that_is_long_enough",
+      nia_base_url: "https://apigcp.trynia.ai/v2",
       project_name: "demo",
-      version: "0.1.0",
+      version: "0.2.0",
       config_path: "/tmp/demo/.nctx/config.json"
     };
     const client: NctxMemoryClient = {

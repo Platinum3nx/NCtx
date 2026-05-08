@@ -1,5 +1,5 @@
 import type { ContextDraft, MemoryType, NormalizedSearchResult, SavedContext } from "../types.js";
-import { makeClient as makeHostedClient } from "./hosted.js";
+import { makeClient as makeDirectClient } from "./direct.js";
 import type { NctxConfig } from "../types.js";
 
 export type NiaContextRequest = ContextDraft;
@@ -40,7 +40,7 @@ export function normalizeSearchResult(raw: unknown): NormalizedSearchResult {
 }
 
 export function makeClient(config: NctxConfig): NiaClient {
-  return makeHostedClient(config);
+  return makeDirectClient(config);
 }
 
 function stringValue(value: unknown): string | undefined {

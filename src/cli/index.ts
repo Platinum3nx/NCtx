@@ -23,10 +23,8 @@ async function main(): Promise<void> {
       "Initialize NCtx in the current project",
       (builder) =>
         builder
-          .option("proxy-url", { type: "string", describe: "Hosted Worker URL" })
-          .option("package-secret", { type: "string", describe: "Package-level install guard secret" })
-          .option("install-token", { type: "string", describe: "Use an existing hosted install token" })
-          .option("rotate-token", { type: "boolean", default: false, describe: "Mint a fresh hosted install token" })
+          .option("nia-api-key", { type: "string", describe: "Your Nia API key. Defaults to NCTX_NIA_API_KEY or NIA_API_KEY." })
+          .option("nia-base-url", { type: "string", describe: "Nia API base URL" })
           .option("project-name", { type: "string", describe: "Project name override" })
           .option("plugin", {
             type: "boolean",
@@ -39,11 +37,9 @@ async function main(): Promise<void> {
         const skipHooks = argv.skipHooks || argv.plugin;
         const skipMcp = argv.skipMcp || argv.plugin;
         const result = await runInit(process.cwd(), {
-          proxyUrl: argv.proxyUrl,
-          packageSecret: argv.packageSecret,
-          installToken: argv.installToken,
+          niaApiKey: argv.niaApiKey,
+          niaBaseUrl: argv.niaBaseUrl,
           projectName: argv.projectName,
-          rotateToken: argv.rotateToken,
           skipHooks,
           skipMcp
         });
@@ -54,7 +50,7 @@ async function main(): Promise<void> {
             `Config: .nctx/config.json`,
             `Hooks: ${skipHooks ? "provided by plugin or skipped" : "registered in .claude/settings.json"}`,
             `MCP: ${skipMcp ? "provided by plugin or skipped" : "registered with Claude Code"}`,
-            `Token: ${result.tokenAction}`
+            `Nia key: ${result.keyAction}`
           ].join("\n")
         );
       }
@@ -100,7 +96,7 @@ async function main(): Promise<void> {
           .option("worker-live", {
             type: "boolean",
             default: true,
-            describe: "Run a lightweight Worker reachability/isolation probe"
+            describe: "Run a lightweight Nia reachability probe"
           }),
       async (argv) => {
         process.exitCode = await runDoctor(process.cwd(), {

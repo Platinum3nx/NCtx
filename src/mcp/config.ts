@@ -1,11 +1,12 @@
 import { readFileSync } from "node:fs";
 import { findConfigPath } from "../config/load.js";
+import { DEFAULT_NIA_BASE_URL } from "../lib/constants.js";
 
 export interface NctxMcpConfig {
-  mode: "hosted";
-  install_token: string;
-  proxy_url: string;
-  project_name?: string;
+  mode: "direct";
+  nia_api_key: string;
+  nia_base_url: string;
+  project_name: string;
   version?: string;
   config_path: string;
 }
@@ -22,18 +23,28 @@ export function loadConfig(projectDir = process.cwd()): NctxMcpConfig {
   }
 
   const parsed = parseConfig(readFileSync(configPath, "utf8"), configPath);
-  if (parsed.mode !== "hosted") {
-    throw new Error(`Unsupported NCtx mode ${String(parsed.mode)}. v4 MCP retrieval supports hosted mode only.`);
+  if (parsed.mode !== "direct") {
+    if (parsed.mode === "hosted") {
+      throw new Error(
+        `Hosted NCtx configs are no longer supported by nctx_memory. Re-run \`nctx init --plugin --nia-api-key <key>\` in ${configPath}.`
+      );
+    }
+    throw new Error(`Unsupported NCtx mode ${String(parsed.mode)}. NCtx MCP retrieval supports direct BYOK mode only.`);
   }
 
-  const installToken = readRequiredString(parsed, "install_token", configPath);
-  const proxyUrl = validateProxyUrl(readRequiredString(parsed, "proxy_url", configPath), configPath);
+  if ("install_token" in parsed || "proxy_url" in parsed) {
+    throw new Error(`direct mode must not contain hosted Worker credentials in ${configPath}`);
+  }
+
+  const niaApiKey = readRequiredString(parsed, "nia_api_key", configPath);
+  const niaBaseUrl = validateServiceUrl(readOptionalString(parsed, "nia_base_url") ?? DEFAULT_NIA_BASE_URL, "nia_base_url", configPath);
+  const projectName = readRequiredString(parsed, "project_name", configPath);
 
   return {
-    mode: "hosted",
-    install_token: installToken,
-    proxy_url: proxyUrl,
-    project_name: readOptionalString(parsed, "project_name"),
+    mode: "direct",
+    nia_api_key: niaApiKey,
+    nia_base_url: niaBaseUrl,
+    project_name: projectName,
     version: readOptionalString(parsed, "version"),
     config_path: configPath
   };
@@ -69,19 +80,19 @@ function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function validateProxyUrl(proxyUrl: string, configPath: string): string {
+function validateServiceUrl(rawUrl: string, label: string, configPath: string): string {
   let url: URL;
   try {
-    url = new URL(proxyUrl);
+    url = new URL(rawUrl);
   } catch {
-    throw new Error(`Invalid proxy_url in ${configPath}: ${proxyUrl}`);
+    throw new Error(`Invalid ${label} in ${configPath}: ${rawUrl}`);
   }
 
-  if (url.protocol === "https:") return proxyUrl;
-  if (url.protocol === "http:" && isAllowedPlaintextDevHost(url.hostname)) return proxyUrl;
+  if (url.protocol === "https:") return rawUrl.replace(/\/+$/, "");
+  if (url.protocol === "http:" && isAllowedPlaintextDevHost(url.hostname)) return rawUrl.replace(/\/+$/, "");
 
   throw new Error(
-    `Invalid proxy_url in ${configPath}: remote plaintext HTTP is not allowed (${proxyUrl}). Use https, localhost, or 127.0.0.1.`
+    `Invalid ${label} in ${configPath}: remote plaintext HTTP is not allowed (${rawUrl}). Use https, localhost, or 127.0.0.1.`
   );
 }
 

@@ -5,10 +5,10 @@ import { loadConfig } from "../config/load.js";
 import { getMcpStatus } from "../config/mcp-register.js";
 import { getClaudeCapabilities } from "../capture/extract.js";
 import type { NctxConfig } from "../types.js";
+import { AGENT_SOURCE } from "../lib/constants.js";
 
-const WORKER_PROBE_QUERY = "__nctx_doctor_probe__";
-const DEFAULT_WORKER_PROBE_TIMEOUT_MS = 5_000;
-const EXPECTED_AGENT_SOURCE = "nctx-claude-code";
+const NIA_PROBE_QUERY = "__nctx_doctor_probe__";
+const DEFAULT_NIA_PROBE_TIMEOUT_MS = 5_000;
 
 type DoctorCheck = [string, boolean, string?];
 type LifecycleStatus = {
@@ -52,15 +52,15 @@ export async function runDoctor(
   try {
     config = await loadConfig(cwd);
     checks.push(["config", true]);
-    checks.push(["install token present", Boolean(config.install_token)]);
-    checks.push(["hosted mode", config.mode === "hosted"]);
+    checks.push(["Nia API key present", Boolean(config.nia_api_key)]);
+    checks.push(["direct BYOK mode", config.mode === "direct"]);
   } catch (err) {
     checks.push(["config", false, err instanceof Error ? err.message : String(err)]);
   }
 
   if (config && options.workerLive !== false) {
     checks.push(
-      ...(await checkHostedWorker(config, {
+      ...(await checkDirectNia(config, {
         fetchImpl: options.fetchImpl,
         timeoutMs: options.workerTimeoutMs
       }))
@@ -106,14 +106,14 @@ export async function runDoctor(
   return failures ? 1 : 0;
 }
 
-export async function checkHostedWorker(
+export async function checkDirectNia(
   config: NctxConfig,
   options: { fetchImpl?: typeof fetch; timeoutMs?: number } = {}
 ): Promise<DoctorCheck[]> {
   const fetchImpl = options.fetchImpl ?? fetch;
-  const timeoutMs = options.timeoutMs ?? DEFAULT_WORKER_PROBE_TIMEOUT_MS;
-  const url = new URL(`${config.proxy_url.replace(/\/+$/, "")}/contexts/semantic-search`);
-  url.searchParams.set("q", WORKER_PROBE_QUERY);
+  const timeoutMs = options.timeoutMs ?? DEFAULT_NIA_PROBE_TIMEOUT_MS;
+  const url = new URL(`${config.nia_base_url.replace(/\/+$/, "")}/contexts/semantic-search`);
+  url.searchParams.set("q", NIA_PROBE_QUERY);
   url.searchParams.set("limit", "1");
   url.searchParams.set("include_highlights", "false");
 
@@ -123,15 +123,15 @@ export async function checkHostedWorker(
       url,
       {
         headers: {
-          Authorization: `Bearer ${config.install_token}`
+          Authorization: `Bearer ${config.nia_api_key}`
         }
       },
       timeoutMs
     );
-    const checks: DoctorCheck[] = [["Worker reachable", true]];
+    const checks: DoctorCheck[] = [["Nia reachable", true]];
 
     if (!response.ok) {
-      checks.push(["hosted search response", false, await responseDetail(response)]);
+      checks.push(["Nia search response", false, await responseDetail(response)]);
       return checks;
     }
 
@@ -139,36 +139,36 @@ export async function checkHostedWorker(
     try {
       body = await response.json();
     } catch {
-      checks.push(["hosted search response", false, "Worker returned non-JSON search response"]);
+      checks.push(["Nia search response", false, "Nia returned non-JSON search response"]);
       return checks;
     }
 
     if (!hasSearchResultsShape(body)) {
       checks.push([
-        "hosted search response",
+        "Nia search response",
         false,
-        "Worker search response did not include a results array"
+        "Nia search response did not include a results array"
       ]);
       return checks;
     }
     checks.push([
-      "hosted search response",
+      "Nia search response",
       true
     ]);
     if (body.results.length === 0) return checks;
 
-    const isolatedShape = hasIsolatedSearchResults(body.results);
+    const isolatedShape = hasProjectScopedSearchResults(body.results, projectTagFor(config.project_name));
     checks.push([
-      "hosted result isolation",
+      "Nia project result scope",
       isolatedShape,
-      isolatedShape ? undefined : "Worker search results were not isolated to this hosted install"
+      isolatedShape ? undefined : "Nia search results were not scoped to this NCtx project"
     ]);
     return checks;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     return [
-      ["Worker reachable", false, detail],
-      ["hosted search response", false, "skipped because Worker probe failed"]
+      ["Nia reachable", false, detail],
+      ["Nia search response", false, "skipped because Nia probe failed"]
     ];
   }
 }
@@ -184,7 +184,7 @@ async function fetchWithTimeout(
   const timeoutPromise = new Promise<Response>((_, reject) => {
     timeout = setTimeout(() => {
       controller.abort();
-      reject(new Error(`Worker probe timed out after ${timeoutMs}ms`));
+      reject(new Error(`Nia probe timed out after ${timeoutMs}ms`));
     }, timeoutMs);
   });
 
@@ -222,15 +222,15 @@ function hasSearchResultsShape(body: unknown): body is { results: unknown[] } {
   return true;
 }
 
-function hasIsolatedSearchResults(results: unknown[]): boolean {
+function hasProjectScopedSearchResults(results: unknown[], projectTag: string): boolean {
   return results.every((result) => {
     if (!isRecord(result)) return false;
-    return result.agent_source === EXPECTED_AGENT_SOURCE && hasInstallTag(result.tags);
+    return result.agent_source === AGENT_SOURCE && hasProjectTag(result.tags, projectTag);
   });
 }
 
-function hasInstallTag(tags: unknown): boolean {
-  return Array.isArray(tags) && tags.some((tag) => typeof tag === "string" && tag.startsWith("install:"));
+function hasProjectTag(tags: unknown, projectTag: string): boolean {
+  return Array.isArray(tags) && tags.some((tag) => typeof tag === "string" && tag === projectTag);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -288,4 +288,11 @@ function isNctxCaptureCommand(command: string): boolean {
 
 function emptyLifecycleStatus(): LifecycleStatus {
   return { hasSessionEnd: false, hasPreCompact: false, hasRecursionGuard: false, hasObsoleteStop: false };
+}
+
+function projectTagFor(projectNameOrTag: string): string {
+  const trimmed = projectNameOrTag.trim();
+  const rawProject = trimmed.toLowerCase().startsWith("project:") ? trimmed.slice("project:".length) : trimmed;
+  const normalized = rawProject.trim().toLowerCase().replace(/\s+/g, "-");
+  return `project:${normalized || "project"}`;
 }

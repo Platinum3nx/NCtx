@@ -22,7 +22,7 @@ import { ensureDir, memoryDir, pendingDir, readJson, sessionsDir, spoolDir, writ
 import { withFileLock } from "../lib/lock.js";
 import { asErrorMessage, logError } from "../lib/log.js";
 import { drainPendingContexts, queuePending, removePendingContext } from "../lib/pending.js";
-import { makeClient } from "../nia/hosted.js";
+import { makeClient } from "../nia/client.js";
 
 const DEFAULT_STDIN_TIMEOUT_MS = 10_000;
 const DEFAULT_DETACH_STDIN_TIMEOUT_MS = 1_000;

@@ -59,7 +59,8 @@ export async function runStatus(cwd: string): Promise<void> {
 
   // Detect mode
   const isPlugin = Boolean(process.env.CLAUDE_PLUGIN_ROOT);
-  const mode = isPlugin ? "hosted (plugin)" : "hosted (standalone CLI)";
+  const modeLabel = config?.mode === "direct" ? "direct BYOK" : "not configured";
+  const mode = isPlugin ? `${modeLabel} (plugin)` : `${modeLabel} (standalone CLI)`;
 
   // Format last capture time
   const lastCapture = lastCaptureTime ? formatRelativeTime(lastCaptureTime) : "never";

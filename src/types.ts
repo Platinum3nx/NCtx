@@ -13,13 +13,25 @@ export type HookInput = {
   custom_instructions?: string;
 };
 
+export type NctxMode = "direct";
+
 export type NctxConfig = {
+  mode: "direct";
+  nia_api_key: string;
+  nia_base_url: string;
+  project_name: string;
+  version: string;
+};
+
+export type HostedNctxConfig = {
   mode: "hosted";
   install_token: string;
   proxy_url: string;
   project_name: string;
   version: string;
 };
+
+export type DirectNctxConfig = NctxConfig;
 
 export type ToolAction = {
   tool: string;

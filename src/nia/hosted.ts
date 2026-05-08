@@ -1,4 +1,4 @@
-import type { NctxConfig, ContextDraft, NormalizedSearchResult, SavedContext } from "../types.js";
+import type { ContextDraft, HostedNctxConfig, NormalizedSearchResult, SavedContext } from "../types.js";
 import type { NiaClient } from "./client.js";
 import { normalizeSearchResultsResponse } from "./client.js";
 
@@ -6,7 +6,7 @@ const DEFAULT_WORKER_TIMEOUT_MS = 15_000;
 
 export class HostedNiaClient implements NiaClient {
   constructor(
-    private readonly config: NctxConfig,
+    private readonly config: HostedNctxConfig,
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly timeoutMs = DEFAULT_WORKER_TIMEOUT_MS
   ) {}
@@ -83,7 +83,7 @@ async function fetchWithTimeout(
   }
 }
 
-export function makeClient(config: NctxConfig): HostedNiaClient {
+export function makeClient(config: HostedNctxConfig): HostedNiaClient {
   if (config.mode !== "hosted") throw new Error(`Unsupported NCtx mode: ${config.mode}`);
   return new HostedNiaClient(config);
 }

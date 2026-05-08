@@ -2,19 +2,19 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { checkHostedWorker } from "../../src/cli/doctor.js";
+import { checkDirectNia } from "../../src/cli/doctor.js";
 import { getMcpStatus, parseMcpListStatus } from "../../src/config/mcp-register.js";
 import type { NctxConfig } from "../../src/types.js";
 
 const roots: string[] = [];
 
 const config: NctxConfig = {
-  mode: "hosted",
-  install_token: "nctx_it_test_token_that_is_long_enough",
-  proxy_url: "https://worker.example/",
+  mode: "direct",
+  nia_api_key: "nia_test_user_key_that_is_long_enough",
+  nia_base_url: "https://apigcp.trynia.ai/v2",
   project_name: "demo",
   version: "0.1.0"
-};
+} as any;
 
 async function tempRoot(): Promise<string> {
   const dir = await mkdtemp(path.join(os.tmpdir(), "nctx-doctor-"));
@@ -26,11 +26,11 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-describe("doctor Worker checks", () => {
-  it("runs a lightweight authenticated Worker isolation probe", async () => {
+describe("doctor Nia checks", () => {
+  it("runs a lightweight authenticated direct Nia project-scope probe", async () => {
     const requests: Request[] = [];
 
-    const checks = await checkHostedWorker(config, {
+    const checks = await checkDirectNia(config, {
       fetchImpl: async (input, init) => {
         requests.push(new Request(input, init));
         return Response.json({
@@ -38,7 +38,7 @@ describe("doctor Worker checks", () => {
             {
               id: "ctx_1",
               agent_source: "nctx-claude-code",
-              tags: ["install:server"]
+              tags: ["project:demo"]
             }
           ]
         });
@@ -46,47 +46,47 @@ describe("doctor Worker checks", () => {
     });
 
     expect(checks.map(([name, ok]) => [name, ok])).toEqual([
-      ["Worker reachable", true],
-      ["hosted search response", true],
-      ["hosted result isolation", true]
+      ["Nia reachable", true],
+      ["Nia search response", true],
+      ["Nia project result scope", true]
     ]);
     expect(requests).toHaveLength(1);
     const request = requests[0] as Request;
     expect(request.url).toBe(
-      "https://worker.example/contexts/semantic-search?q=__nctx_doctor_probe__&limit=1&include_highlights=false"
+      "https://apigcp.trynia.ai/v2/contexts/semantic-search?q=__nctx_doctor_probe__&limit=1&include_highlights=false"
     );
-    expect(request.headers.get("Authorization")).toBe(`Bearer ${config.install_token}`);
+    expect(request.headers.get("Authorization")).toBe(`Bearer ${config.nia_api_key}`);
   });
 
-  it("flags a live probe response that is not isolated to the hosted agent source", async () => {
-    const checks = await checkHostedWorker(config, {
+  it("flags a live probe response that is not scoped to the direct project", async () => {
+    const checks = await checkDirectNia(config, {
       fetchImpl: async () =>
         Response.json({
           results: [
             {
               id: "ctx_foreign",
               agent_source: "other-agent",
-              tags: ["install:server"]
+              tags: ["project:demo"]
             }
           ]
         })
     });
 
     expect(checks.map(([name, ok]) => [name, ok])).toEqual([
-      ["Worker reachable", true],
-      ["hosted search response", true],
-      ["hosted result isolation", false]
+      ["Nia reachable", true],
+      ["Nia search response", true],
+      ["Nia project result scope", false]
     ]);
   });
 
-  it("does not claim hosted result isolation when the probe returns no results", async () => {
-    const checks = await checkHostedWorker(config, {
+  it("does not claim project result scope when the probe returns no results", async () => {
+    const checks = await checkDirectNia(config, {
       fetchImpl: async () => Response.json({ results: [] })
     });
 
     expect(checks.map(([name, ok]) => [name, ok])).toEqual([
-      ["Worker reachable", true],
-      ["hosted search response", true]
+      ["Nia reachable", true],
+      ["Nia search response", true]
     ]);
   });
 });

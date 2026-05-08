@@ -1,7 +1,8 @@
 import { existsSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import type { NctxConfig } from "../types.js";
+import type { DirectNctxConfig, HostedNctxConfig, NctxConfig } from "../types.js";
 import { memoryDir, nctxDir, pendingDir, readJson, sessionsDir, spoolDir, writeJson, ensureDir } from "../lib/fs.js";
+import { DEFAULT_NIA_BASE_URL } from "../lib/constants.js";
 
 export type ConfigValidationResult = {
   ok: boolean;
@@ -9,11 +10,13 @@ export type ConfigValidationResult = {
   warnings: string[];
 };
 
-const FORBIDDEN_HOSTED_CONFIG_KEYS = new Set([
+const FORBIDDEN_DIRECT_CONFIG_KEYS = new Set([
   "shared_secret",
+  "package_secret",
   "nia_key",
-  "nia_api_key",
-  "install_id"
+  "install_token",
+  "install_id",
+  "proxy_url"
 ]);
 
 export function configPath(cwd: string): string {
@@ -68,13 +71,28 @@ export function createHostedConfig(input: {
   proxyUrl: string;
   projectName?: string;
   projectRoot: string;
-}): NctxConfig {
+}): HostedNctxConfig {
   return {
     mode: "hosted",
     install_token: input.installToken,
     proxy_url: input.proxyUrl.replace(/\/+$/, ""),
     project_name: input.projectName ?? defaultProjectName(input.projectRoot),
     version: "0.1.0"
+  };
+}
+
+export function createDirectConfig(input: {
+  niaApiKey: string;
+  niaBaseUrl?: string;
+  projectName?: string;
+  projectRoot: string;
+}): DirectNctxConfig {
+  return {
+    mode: "direct",
+    nia_api_key: input.niaApiKey.trim(),
+    nia_base_url: (input.niaBaseUrl ?? DEFAULT_NIA_BASE_URL).replace(/\/+$/, ""),
+    project_name: input.projectName ?? defaultProjectName(input.projectRoot),
+    version: "0.2.0"
   };
 }
 
@@ -116,30 +134,21 @@ export function validateConfig(value: unknown): ConfigValidationResult {
     return { ok: false, errors: ["config must be a JSON object"], warnings };
   }
 
-  for (const key of Object.keys(value)) {
-    if (FORBIDDEN_HOSTED_CONFIG_KEYS.has(key)) {
-      errors.push(`hosted config must not contain ${key}`);
+  if (value.mode === "hosted") {
+    errors.push("hosted config is no longer supported. Re-run `nctx init --plugin --nia-api-key <key>` to use BYOK direct mode.");
+  } else if (value.mode === "byok") {
+    errors.push("mode must be \"direct\". Re-run `nctx init --plugin --nia-api-key <key>` to refresh this config.");
+  } else if (value.mode === "direct") {
+    for (const key of Object.keys(value)) {
+      if (FORBIDDEN_DIRECT_CONFIG_KEYS.has(key)) {
+        errors.push(`direct config must not contain ${key}`);
+      }
     }
-  }
-
-  if (value.mode !== "hosted") {
+    validateDirectConfig(value, errors);
+  } else {
     errors.push(`Unsupported NCtx mode: ${String(value.mode)}`);
   }
-  if (typeof value.install_token !== "string" || value.install_token.length < 20) {
-    errors.push("missing install_token or token is too short");
-  }
-  if (typeof value.proxy_url !== "string" || value.proxy_url.trim() === "") {
-    errors.push("missing proxy_url");
-  } else {
-    try {
-      const url = new URL(value.proxy_url);
-      if (!isAllowedProxyUrl(url)) {
-        errors.push("proxy_url must use https except for localhost development");
-      }
-    } catch {
-      errors.push("proxy_url must be a valid URL");
-    }
-  }
+
   if (typeof value.project_name !== "string" || !value.project_name.trim()) {
     errors.push("missing project_name");
   }
@@ -150,11 +159,34 @@ export function validateConfig(value: unknown): ConfigValidationResult {
   return { ok: errors.length === 0, errors, warnings };
 }
 
+function validateDirectConfig(value: Record<string, unknown>, errors: string[]): void {
+  if (typeof value.nia_api_key !== "string" || value.nia_api_key.trim().length < 8) {
+    errors.push("missing nia_api_key or key is too short");
+  }
+
+  if (typeof value.nia_base_url !== "string" || value.nia_base_url.trim() === "") {
+    errors.push("nia_base_url must be a valid URL");
+  } else {
+    validateServiceUrl(value.nia_base_url, "nia_base_url", errors);
+  }
+}
+
+function validateServiceUrl(rawUrl: string, label: string, errors: string[]): void {
+  try {
+    const url = new URL(rawUrl);
+    if (!isAllowedServiceUrl(url)) {
+      errors.push(`${label} must use https except for localhost development`);
+    }
+  } catch {
+    errors.push(`${label} must be a valid URL`);
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isAllowedProxyUrl(url: URL): boolean {
+function isAllowedServiceUrl(url: URL): boolean {
   if (url.protocol === "https:") return true;
   if (url.protocol !== "http:") return false;
   return url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
