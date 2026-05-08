@@ -1,6 +1,8 @@
 # NCtx Worker
 
-Cloudflare Worker proxy for the NCtx hosted beta.
+Cloudflare Worker proxy for the legacy NCtx hosted beta.
+
+Normal NCtx plugin use is now BYOK direct Nia mode and does not call this Worker. Keep this package only for legacy hosted-beta installs, migration testing, and isolation regression coverage.
 
 The Worker owns:
 
@@ -15,7 +17,7 @@ The Worker owns:
 - Durable Object daily counters.
 - Cloudflare Rate Limiting binding for short-window abuse control.
 
-It does not store user content.
+It does not store user content. It does store token-hash to install-id mappings for legacy hosted installs.
 
 ## Setup
 
@@ -102,4 +104,3 @@ curl -G "$WORKER/contexts/search" \
 ```
 
 Install A should find the memory. Install B should not.
-

@@ -2,13 +2,13 @@
 
 Persistent Claude Code session memory powered by Nia Context Sharing.
 
-NCtx captures durable session knowledge from Claude Code, stores typed memories in Nia through a hosted Cloudflare Worker, and exposes a local MCP tool (`nctx_memory`) so future Claude Code sessions can recall prior decisions, gotchas, patterns, and current state.
+NCtx captures durable session knowledge from Claude Code, stores typed memories directly in the user's Nia account, and exposes a local MCP tool (`nctx_memory`) so future Claude Code sessions can recall prior decisions, gotchas, patterns, and current state.
 
 ## Status
 
 This repo contains the working beta implementation described in `NCTX_PRD_v4.md`, plus the hardening work tracked in `betaIssues.md` and `betaImprovements.md`.
 
-Current repo and npm package version: `0.1.3`.
+Current repo and npm package version: `0.1.4`.
 
 Implemented:
 
@@ -24,34 +24,34 @@ Implemented:
 - Memory splitting into `fact`, `procedural`, and `episodic` Nia contexts.
 - Durable-evidence dedupe, so orphaned local captures do not block retry extraction.
 - Pending write durability: pending files are marked saved and removed only after local context-id backfill.
-- Hosted Worker proxy with per-install bearer tokens and tag-based isolation.
-- Worker semantic retrieval post-filtering plus safe text-search supplement/fallback paths.
-- Durable Object per-install daily caps and Cloudflare Rate Limiting binding.
+- BYOK direct Nia mode for normal plugin and CLI use.
+- Project-scoped retrieval through `project:<name>` tags.
+- Legacy hosted Worker compatibility for installs that have not migrated yet.
 - Local MCP server exposing `nctx_memory`.
 - Sanitized MCP metadata and remote error details.
 - Local `nctx status` and `nctx doctor` diagnostics.
 
-Launch readiness notes as of May 6, 2026:
+Launch readiness notes as of May 8, 2026:
 
-- `@platinum3nx/nctx@0.1.3` is published on npm and matches the marketplace manifest.
-- The hosted Worker is deployed at `https://nctx.amalghan70.workers.dev`.
-- Fresh install, project init, detached `SessionEnd` capture, hosted save, and MCP recall smoke tests have passed.
+- `@platinum3nx/nctx@0.1.4` is published on npm and matches the marketplace manifest.
+- BYOK direct Nia mode is the normal install path.
+- The hosted Worker remains available only as a legacy migration path.
 
-## Hosted Beta Model
+## BYOK Direct Nia Model
 
-The beta is hosted-only. Users do not need a Nia account or Nia key.
+Users provide their own Nia API key. NCtx stores and searches memories directly against Nia from the local CLI and MCP server; the hosted Worker is not used for normal plugin operation.
 
 Flow:
 
-1. Project init (`nctx init --plugin` for plugin users, or `nctx init` for standalone CLI users) registers an install with the NCtx Worker.
-2. The Worker mints a high-entropy `install_token` and a server-side `install_id`.
-3. The CLI stores only `install_token` in `.nctx/config.json`.
-4. Saves/searches go through the Worker with `Authorization: Bearer <install_token>`.
-5. The Worker injects `install:<install_id>` tags and the enterprise Nia key.
+1. The user creates or copies a Nia API key from their Nia account.
+2. Project init (`nctx init --plugin` for plugin users, or `nctx init` for standalone CLI users) writes a project-local `.nctx/config.json`.
+3. The config stores the user's Nia API key with owner-only file permissions.
+4. Saves/searches call the Nia API directly with `Authorization: Bearer <NIA_API_KEY>`.
+5. NCtx scopes saved and retrieved memories with `project:<project-name>` tags.
 
-The Worker stores no user content. It stores only token-hash to install-id mappings in KV and request counters in Durable Objects.
+The hosted Worker no longer holds the enterprise Nia key for normal users. Existing hosted installs can migrate by re-running init with their own Nia key.
 
-If an `install_token` leaks, only that one install's memories are exposed. Other installs and the enterprise Nia account remain isolated.
+Treat `.nctx/config.json` as a secret because it contains the user's Nia API key. NCtx writes it as `0600`, adds `.nctx/` to `.gitignore`, and rejects direct-mode configs that still contain hosted Worker credentials.
 
 ## Quick Start
 
@@ -59,8 +59,7 @@ Prerequisites:
 
 - Claude Code with plugin support.
 - Node.js `>=20.18.0` for `npx`.
-
-No Nia account, Nia API key, Cloudflare account, or package secret is required for the hosted beta.
+- A Nia API key.
 
 Install the Claude Code plugin once per machine/user:
 
@@ -73,8 +72,10 @@ Initialize NCtx once per project:
 
 ```bash
 cd /path/to/your/project
-npx -y @platinum3nx/nctx@0.1.3 init --plugin
+NIA_API_KEY="nia_..." npx -y @platinum3nx/nctx@0.1.4 init --plugin
 ```
+
+You can also pass the key explicitly with `--nia-api-key`, but using `NIA_API_KEY` keeps it out of shell history more easily.
 
 The plugin install does not need to put a global `nctx` command on your shell `PATH`; the `npx` command above is the intended project init path.
 
@@ -84,7 +85,7 @@ Then use Claude Code normally:
 claude
 ```
 
-NCtx runs automatically through the plugin hooks and `nctx_memory` MCP server. It captures durable project memory on `PreCompact` and `SessionEnd`, stores it through the hosted Worker/Nia path, and makes it available to future Claude Code sessions through the `nctx_memory` tool.
+NCtx runs automatically through the plugin hooks and `nctx_memory` MCP server. It captures durable project memory on `PreCompact` and `SessionEnd`, stores it directly in Nia, and makes it available to future Claude Code sessions through the `nctx_memory` tool.
 
 Verify the installed plugin version:
 
@@ -92,7 +93,7 @@ Verify the installed plugin version:
 claude plugin list
 ```
 
-You should see `nctx@nctx-marketplace` at version `0.1.3`.
+You should see `nctx@nctx-marketplace` at version `0.1.4`.
 
 If you previously installed `0.1.2` and Claude Code keeps reusing a stale cache:
 
@@ -141,45 +142,41 @@ claude plugin validate .
 The plugin flow above is recommended. If you want a global `nctx` command for standalone CLI use:
 
 ```bash
-npm install -g @platinum3nx/nctx@0.1.3
-nctx init
+npm install -g @platinum3nx/nctx@0.1.4
+NIA_API_KEY="nia_..." nctx init
 ```
 
 If you do not install globally, prefix commands with `npx`. For plugin-mode project init:
 
 ```bash
-npx -y @platinum3nx/nctx@0.1.3 init --plugin
+NIA_API_KEY="nia_..." npx -y @platinum3nx/nctx@0.1.4 init --plugin
 ```
 
 For standalone project init without the Claude Code plugin:
 
 ```bash
-npx -y @platinum3nx/nctx@0.1.3 init
+NIA_API_KEY="nia_..." npx -y @platinum3nx/nctx@0.1.4 init
 ```
 
 `nctx init --plugin` writes `.nctx/config.json` only. Hooks and MCP are supplied by the Claude Code plugin package. Plain `nctx init` is for standalone CLI mode and writes project `.claude/settings.json` hooks plus MCP registration.
 
-## Self-Hosted / Development Init
+## Hosted Migration
 
-Normal beta users do not need a package secret. The hosted Worker accepts the public beta client secret bundled in `0.1.3`.
-
-For development against a custom Worker:
+Older beta installs may have a hosted config with `mode: "hosted"`, an `install_token`, and a `proxy_url`. To migrate the project to BYOK direct Nia:
 
 ```bash
 cd /path/to/your/project
-npx -y @platinum3nx/nctx@0.1.3 init \
-  --proxy-url https://your-worker.example \
-  --package-secret "$PACKAGE_SHARED_SECRET"
+NIA_API_KEY="nia_..." npx -y @platinum3nx/nctx@0.1.4 init --plugin
+npx -y @platinum3nx/nctx@0.1.4 reindex
 ```
 
-For local development from this checkout:
+Migration preserves local `.nctx/memories/`, `.nctx/pending/`, `.nctx/spool/`, and `.nctx/sessions/` files. `init` rewrites `.nctx/config.json` into direct mode and removes hosted Worker credentials. `reindex` drains the pending queue and pushes any local memories that do not yet have Nia `context_ids` into the user's own Nia account.
 
-```bash
-cd /path/to/your/project
-node /path/to/NCtx/dist/cli/index.js init \
-  --proxy-url https://nctx.amalghan70.workers.dev \
-  --package-secret "$PACKAGE_SHARED_SECRET"
-```
+Memories that exist only in the old hosted Nia account are not copied automatically. Only local memory files and pending drafts can be migrated. After successful migration, old pending files are removed only after NCtx backfills the returned direct Nia context IDs into the local memory frontmatter.
+
+## Legacy Worker Development
+
+Normal users should not use a Worker. The current CLI initializes direct BYOK mode only. The `worker/` package remains in this repo for legacy hosted-beta migration testing and isolation regression coverage.
 
 If you keep development secrets locally, load them first:
 
@@ -192,9 +189,7 @@ set +a
 Then initialize:
 
 ```bash
-node /path/to/NCtx/dist/cli/index.js init \
-  --proxy-url https://nctx.amalghan70.workers.dev \
-  --package-secret "$PACKAGE_SHARED_SECRET"
+NIA_API_KEY="$NIA_API_KEY" node /path/to/NCtx/dist/cli/index.js init --plugin
 ```
 
 ## Smoke Test
@@ -209,7 +204,7 @@ Ask Claude Code to make a concrete project decision or edit, then exit with `/ex
 
 ```bash
 find .nctx -maxdepth 3 -type f
-npx -y @platinum3nx/nctx@0.1.3 status
+npx -y @platinum3nx/nctx@0.1.4 status
 ```
 
 Expected signs of life:
@@ -242,29 +237,29 @@ Both modes add `.nctx/` to `.gitignore` when it is not already ignored.
 
 ```json
 {
-  "mode": "hosted",
-  "install_token": "nctx_it_...",
-  "proxy_url": "https://nctx.amalghan70.workers.dev",
+  "mode": "direct",
+  "nia_api_key": "nia_...",
+  "nia_base_url": "https://apigcp.trynia.ai/v2",
   "project_name": "your-project",
-  "version": "0.1.0"
+  "version": "0.2.0"
 }
 ```
 
-`version` is the current config schema marker, not the npm package version. It must not store `install_id`, `shared_secret`, or a Nia API key.
+`version` is the current config schema marker, not the npm package version. Direct configs must not store `install_token`, `proxy_url`, `install_id`, or `shared_secret`.
 
 ## Commands
 
-The examples below assume a global install. Without one, replace `nctx` with `npx -y @platinum3nx/nctx@0.1.3`.
+The examples below assume a global install. Without one, replace `nctx` with `npx -y @platinum3nx/nctx@0.1.4`.
 
 ```bash
 nctx init       # standalone: initialize config, hooks, and MCP registration
-nctx init --rotate-token # mint a fresh install token instead of reusing config
+nctx init --nia-api-key "$NIA_API_KEY" # standalone direct BYOK init
 nctx init --plugin # plugin mode: initialize project config only
 nctx capture    # run from Claude Code hook JSON on stdin
 nctx capture --trigger=session-end --detach # fast SessionEnd handoff used by hooks
 nctx capture --from-spool <path> # internal detached capture worker entrypoint
 nctx mcp        # run local MCP server on stdio
-nctx doctor [--no-worker-live] # inspect config, hooks, Claude flags, MCP, and Worker health
+nctx doctor # inspect config, hooks, Claude flags, MCP, and direct Nia reachability
 nctx doctor --claude-flags # inspect only locally supported claude -p flags
 nctx status     # show capture status, pending queue, pushed contexts, and config permissions
 nctx list       # list local memory files
@@ -330,17 +325,16 @@ Capture is designed so a local file alone does not falsely prove that memory rea
 - Same-session dedupe and prior-capture summaries use only durable evidence: `context_ids` in local memory frontmatter or matching files in `.nctx/pending/`.
 - Pending drains mark files with `saved_context_id` and `saved_at`; callers remove them only after backfilling the local memory file.
 - `nctx reindex` drains pending writes, backfills context IDs, and re-queues local memories that still lack durable evidence.
-- `nctx init` mints a fresh token when the configured proxy URL changes, even without `--rotate-token`.
+- Hosted-to-direct migration keeps pending files in place until they are saved to the user's Nia account and backfilled locally.
 
 ## Retrieval And Isolation
 
-All hosted saves and searches go through the Worker:
+Direct saves and searches go to Nia from the local CLI/MCP process:
 
-- Saves always receive a server-side `install:<install_id>` tag, forced `agent_source: "nctx-claude-code"`, and `metadata.install_id`.
-- Spoofed `install:*` tags and spoofed `agent_source` values from clients are rewritten.
-- Text search is upstream-filtered by install tag and then project-filtered defensively.
-- Semantic search over-fetches, post-filters by install tag/project/agent source, and supplements with text search when it returns fewer results than requested.
-- If semantic search fails or returns non-JSON, the Worker attempts text fallback before reporting an upstream error.
+- Saves receive `agent_source: "nctx-claude-code"` and `project:<project-name>` tags.
+- Legacy hosted `install:*` tags and `metadata.install_id` are stripped during direct saves/reindex.
+- Retrieval is scoped to the configured project and does not use hosted Worker install tokens.
+- Semantic and text search normalize current and legacy Nia response shapes before MCP formatting.
 - MCP output sanitizes metadata and remote error strings before returning them as Claude-facing tool text.
 
 ## Development Checks
@@ -354,12 +348,9 @@ npm --prefix worker test
 npm --prefix worker run deploy:dry
 ```
 
-Live checks already validated:
+Live checks should validate:
 
-- Cloudflare Worker deployed at `https://nctx.amalghan70.workers.dev`.
-- Cross-install text search isolation.
-- Cross-install semantic search isolation.
-- Spoofed `install:*` tags and `agent_source` are rewritten.
-- `GET /contexts` returns `404`.
-- Real `claude -p` capture writes local memory and saves typed Nia contexts.
-- MCP stdio server lists `nctx_memory` and retrieves live Worker-scoped memories.
+- Fresh BYOK plugin init writes direct `.nctx/config.json` with owner-only permissions.
+- Real `claude -p` capture writes local memory and saves typed Nia contexts directly.
+- `nctx reindex` drains any pending hosted-beta queue into the user's Nia account.
+- MCP stdio server lists `nctx_memory` and retrieves project-scoped direct Nia memories.

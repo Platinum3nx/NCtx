@@ -2,7 +2,26 @@
 
 Issues found during the full codebase review. They focus on issues that interfere with the project goal: a Claude Code plugin that provides automatic project memory by capturing, isolating, and retrieving Nia-backed context reliably.
 
-**Status: NO KNOWN CODE OR PACKAGE LAUNCH BLOCKERS** (`@platinum3nx/nctx@0.1.3` is published; complete Worker deploy and fresh-install smoke tests before posting)
+**Status: BYOK DIRECT NIA IMPLEMENTED, VERIFIED, AND PUBLISHED AS `@platinum3nx/nctx@0.1.4`**
+
+---
+
+## BYOK Direct Nia Mode — Implemented
+
+### Finding 0. Normal plugin use must be direct BYOK, not hosted Worker — FIXED
+
+- Priority: P1 release prerequisite
+- Files: `src/cli/init.ts`, `src/nia/direct.ts`, `src/nia/client.ts`, `src/mcp/client.ts`, `src/mcp/config.ts`, `src/cli/doctor.ts`, `src/cli/status.ts`, tests and docs.
+- Behavior: `nctx init --plugin` accepts or prompts for a user Nia API key, writes direct-mode `.nctx/config.json`, rejects hosted Worker credentials in direct configs, saves/searches Nia directly with the user's bearer token, strips legacy hosted `install:*` data, and scopes retrieval to the configured project.
+- Migration: Re-running init with a Nia key over an old hosted config removes `install_token`/`proxy_url`; `nctx reindex` drains existing local `.nctx/pending/` drafts and backfills direct Nia context IDs.
+- Verification: `npm run typecheck`, `npm test`, `npm run build`, worker typecheck/tests, packed tarball `--version`, and packed tarball BYOK init smoke all pass.
+
+### Finding 1. `0.1.4` npm publish is blocked by local npm auth — FIXED
+
+- Priority: P1 release prerequisite
+- File: local npm auth, not code.
+- Status: The stale `~/.npmrc` token still fails, but the dedicated publish token in `~/.config/nctx/npm-publish-token.env` was used through a temporary npm userconfig. `npm publish --access public` succeeded.
+- Verification: The public registry resolves `@platinum3nx/nctx@0.1.4` with integrity `sha512-4KOFlkJ0kXvokoVAshS3TmFlvJSizrimLwzUHT6UqqN4eklpD+jcPP13OEMwwPe+Loh/yhIwH8qYgBWuALr4Bg==`; fresh-directory `npx -y @platinum3nx/nctx@0.1.4 --version` prints `0.1.4`.
 
 ---
 
@@ -12,8 +31,8 @@ Issues found during the full codebase review. They focus on issues that interfer
 
 - Priority: P1 release prerequisite
 - File: `.claude-plugin/marketplace.json`
-- Fix: Published `@platinum3nx/nctx@0.1.3` to npm.
-- Verification: `npm view @platinum3nx/nctx versions --json` now includes `0.1.3`, and the registry reports tarball integrity `sha512-/t/BhSpqkGThcEg3s9lOLzn3z3cLN+pUOJDGZhFI6k4Y345mjwpLIZhC2c15UW1la3cmtKNax5fu8EPnKGGPQg==`, matching the dry-run artifact.
+- Fix: Version references are bumped to `0.1.4`, and `@platinum3nx/nctx@0.1.4` is now published on npm.
+- Verification: `npm pack --json` produced `platinum3nx-nctx-0.1.4.tgz` with integrity `sha512-4KOFlkJ0kXvokoVAshS3TmFlvJSizrimLwzUHT6UqqN4eklpD+jcPP13OEMwwPe+Loh/yhIwH8qYgBWuALr4Bg==`, and the public registry now returns the same integrity for `@platinum3nx/nctx@0.1.4`.
 
 ---
 
@@ -95,13 +114,13 @@ Issues found during the full codebase review. They focus on issues that interfer
 
 - Priority: P1
 - File: `tsup.config.ts`
-- Fix: Added `banner` with `createRequire` shim so bundled CJS code (yaml's `require("process")`) resolves Node built-ins correctly within the ESM bundle. `node dist/cli/index.js --version` now prints `0.1.3` without crashing.
+- Fix: Added `banner` with `createRequire` shim so bundled CJS code (yaml's `require("process")`) resolves Node built-ins correctly within the ESM bundle. `node dist/cli/index.js --version` now prints `0.1.4` without crashing.
 
 ### Finding 2. Fixed plugin artifact is not installable as a new version — FIXED
 
 - Priority: P1
 - Files: `package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `src/lib/constants.ts`
-- Fix: All version references bumped from `0.1.2` to `0.1.3`. Ready for `npm publish`.
+- Fix: All version references bumped from `0.1.2` to `0.1.4`. Ready for `npm publish`.
 
 ---
 
